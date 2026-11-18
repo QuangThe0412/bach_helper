@@ -83,8 +83,10 @@ pub fn scan_available_jdks() -> JdkScanResult {
         }
     }
 
-    // 2. Scan standard installation locations
+    // 2. Scan standard installation locations and drive roots (C:\, D:\)
     let mut check_dirs = Vec::new();
+    check_dirs.push(PathBuf::from("C:\\"));
+    check_dirs.push(PathBuf::from("D:\\"));
 
     if let Ok(prog_files) = std::env::var("ProgramFiles") {
         let pf = PathBuf::from(prog_files);
@@ -104,18 +106,35 @@ pub fn scan_available_jdks() -> JdkScanResult {
         if !base_dir.is_dir() {
             continue;
         }
-        if let Ok(entries) = fs::read_dir(base_dir) {
+        let is_drive_root = base_dir.parent().is_none();
+        if let Ok(entries) = fs::read_dir(&base_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
                     let folder_name = path.file_name().unwrap_or_default().to_string_lossy();
+                    let lower = folder_name.to_lowercase();
+                    if is_drive_root && !lower.contains("jdk") && !lower.contains("java") {
+                        continue;
+                    }
                     let is_jdk25 = folder_name.contains("25");
                     if let Some(jdk_opt) = inspect_jdk_folder(&path, "installed_jdk", is_jdk25) {
-                        // Prevent duplicates
-                        if !jdks.iter().any(|j| j.root_path == jdk_opt.root_path) {
+                        if !jdks.iter().any(|j| j.root_path.eq_ignore_ascii_case(&jdk_opt.root_path)) {
                             jdks.push(jdk_opt);
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Check JAVA_HOME if set
+    if let Ok(jh) = std::env::var("JAVA_HOME") {
+        let jh_path = PathBuf::from(jh.trim());
+        if jh_path.is_dir() {
+            let is_jdk25 = jh.contains("25");
+            if let Some(jdk_opt) = inspect_jdk_folder(&jh_path, "java_home", is_jdk25) {
+                if !jdks.iter().any(|j| j.root_path.eq_ignore_ascii_case(&jdk_opt.root_path)) {
+                    jdks.push(jdk_opt);
                 }
             }
         }

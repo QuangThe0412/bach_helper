@@ -326,22 +326,26 @@ pub fn test_ant_executable(exe_path: &str) -> AntTestResult {
     #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+    let clean_path = exe_path.trim().trim_matches('"');
     let mut cmd = Command::new("cmd.exe");
-    let cmd_str = format!("\"{}\" -version", exe_path);
-    cmd.args(["/c", &cmd_str]);
+    cmd.args(["/c", clean_path, "-version"]);
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     match cmd.output() {
         Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = crate::modules::environment::decode_console_bytes(&output.stdout)
+                .trim()
+                .to_string();
+            let stderr = crate::modules::environment::decode_console_bytes(&output.stderr)
+                .trim()
+                .to_string();
             let combined = if !stdout.is_empty() { stdout } else { stderr };
             let exit_code = output.status.code().unwrap_or(-1);
 
             AntTestResult {
                 success: output.status.success() && combined.contains("Apache Ant"),
-                executable_path: exe_path.to_string(),
+                executable_path: clean_path.to_string(),
                 version_output: combined,
                 exit_code,
                 error_message: if output.status.success() {
@@ -353,7 +357,7 @@ pub fn test_ant_executable(exe_path: &str) -> AntTestResult {
         }
         Err(e) => AntTestResult {
             success: false,
-            executable_path: exe_path.to_string(),
+            executable_path: clean_path.to_string(),
             version_output: String::new(),
             exit_code: -1,
             error_message: Some(e.to_string()),

@@ -1,687 +1,690 @@
-/* Windows 95 Custom Desktop & Component Styling */
+/* ==========================================================================
+   Windows 95 Theme & Layout for Batch Helper (English Clean Edition)
+   ========================================================================== */
+
+/* 1. Global Font & Clean Text Rendering (No blurry text-shadow / outlines) */
+*,
+html,
+body,
+button,
+input,
+label,
+legend,
+select,
+option,
+table,
+textarea,
+p,
+div,
+span,
+ul,
+li {
+  font-family: "Segoe UI", Tahoma, Arial, Helvetica, sans-serif !important;
+  -webkit-font-smoothing: antialiased !important;
+  -moz-osx-font-smoothing: grayscale !important;
+  text-shadow: none !important;
+}
+
+/* Fix 98.css transparent color + text-shadow hack on buttons */
+button,
+input[type="reset"],
+input[type="submit"] {
+  color: #000000 !important;
+  text-shadow: none !important;
+}
+
+button:disabled,
+input[type="reset"]:disabled,
+input[type="submit"]:disabled {
+  color: #777777 !important;
+  text-shadow: none !important;
+}
 
 :root {
-  --win-desktop-bg: #008080;
   --win-gray: #c0c0c0;
   --win-light: #ffffff;
   --win-dark: #808080;
   --win-black: #000000;
   --win-blue: #000080;
-  --win-blue-light: #1084d0;
-  --win-green: #008000;
-  --win-red: #800000;
+  --win-green: #007a00;
+  --win-red: #bb0000;
 }
 
-* {
+
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background-color: var(--win-gray);
+    font-size: 11px;
+    color: #000000;
+    user-select: none;
+  }
+
+  /* App Full-Window Flex Container */
+  .app-container {
+    display: flex;
+    flex-direction: column;
+    width: 100vw;
+    height: 100vh;
+    padding: 6px 8px 4px 8px;
+    box-sizing: border-box;
+    gap: 6px;
+  }
+
+  /* Common Win95 Box / Fieldset */
+  .win95-box {
+    margin: 0 !important;
+    padding: 6px 8px !important;
+    box-sizing: border-box;
+  }
+
+  .win95-box legend {
+    font-size: 11px;
+    font-weight: bold;
+    color: #000000;
+    padding: 0 4px;
+  }
+
+  /* ==========================================================================
+   0. MULTI-PROJECT TABS BAR (WIN95 TAB STRIP)
+   ========================================================================== */
+.project-tabs-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
+  border-bottom: 2px solid #ffffff;
+  padding-bottom: 1px;
+}
+
+.project-tabs-list {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  overflow-x: auto;
+  max-width: calc(100% - 95px);
+}
+
+.project-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 23px;
+  padding: 0 8px 0 10px;
+  background-color: #b8b8b8;
+  box-shadow: inset 1px 1px #ffffff, inset -1px 0 #0a0a0a, inset 2px 2px #dfdfdf, inset -2px 0 #808080;
+  border-top-left-radius: 2px;
+  border-top-right-radius: 2px;
+  cursor: pointer;
+  font-size: 11px;
+  color: #333333;
+  white-space: nowrap;
+  max-width: 240px;
   box-sizing: border-box;
 }
 
-html, body {
-  margin: 0;
-  padding: 0;
-  width: 100vw;
-  height: 100vh;
-  overflow: hidden;
-  background-color: var(--win-desktop-bg);
-  font-family: "MS Sans Serif", "Segoe UI", Tahoma, sans-serif;
-  font-size: 11px;
-  user-select: none;
+.project-tab:hover {
+  background-color: #cacaca;
 }
 
-/* Desktop container */
-.desktop {
-  display: flex;
-  flex-direction: column;
-  width: 100vw;
-  height: 100vh;
-  background-color: var(--win-desktop-bg);
-  position: relative;
-}
-
-/* Main Application Window */
-.main-app-window {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  margin: 4px 6px 32px 6px; /* leave room for taskbar */
-  box-shadow: 2px 2px 0 var(--win-black);
-  height: calc(100vh - 38px);
-}
-
-.window-body {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  padding: 6px;
-  overflow: hidden;
-}
-
-/* Win95 Menu Bar */
-.win95-menubar {
-  display: flex;
+.project-tab.active {
+  height: 25px;
   background-color: var(--win-gray);
-  border-bottom: 1px solid var(--win-dark);
-  padding: 2px 4px;
-}
-
-.menu-item {
-  padding: 2px 6px;
-  cursor: default;
-}
-
-.menu-item:hover {
-  background-color: var(--win-blue);
-  color: var(--win-light);
-}
-
-/* Win95 Tabs Styling */
-.win95-tabs {
-  margin: 0 0 4px 0 !important;
-  padding-left: 2px !important;
-}
-
-.win95-tabs li a {
   font-weight: bold;
+  color: #000080;
+  box-shadow: inset 1px 1px #ffffff, inset -1px 0 #0a0a0a, inset 2px 2px #dfdfdf, inset -2px 0 #808080;
 }
 
-/* Tab contents */
-.tab-content {
-  display: none;
-  flex: 1;
-  overflow-y: auto;
-  padding: 6px 4px;
-}
-
-.tab-content.active {
-  display: block;
-}
-
-/* Win95 Box / Fieldset */
-.win95-box {
-  margin-bottom: 8px !important;
-  padding: 8px 10px !important;
-}
-
-.win95-box legend {
-  font-size: 11px;
-}
-
-/* Path Input Group */
-.path-input-group {
-  display: flex;
-  gap: 6px;
-  margin-top: 4px;
-  align-items: center;
-}
-
-.path-input-group input[type="text"] {
-  flex: 1;
-  height: 24px;
-  font-size: 12px;
-  font-family: "MS Sans Serif", Tahoma, sans-serif;
-  padding: 2px 6px;
-}
-
-.win95-btn {
-  height: 24px;
-  min-width: 75px;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 11px;
+.project-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 185px;
 }
 
-.btn-highlight {
-  font-weight: bold;
-}
-
-.btn-small {
-  height: 20px;
-  min-width: 50px;
-  padding: 0 6px;
-}
-
-.quick-sample-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 6px;
-}
-
-.sample-label {
-  color: #404040;
-  font-style: italic;
-}
-
-/* Status Banners */
-.status-banner {
-  padding: 6px 10px;
-  margin-bottom: 8px;
-  border: 1px solid var(--win-dark);
-  background-color: #ffffd0;
-  box-shadow: inset 1px 1px 0 var(--win-black);
-}
-
-.status-banner.info {
-  background-color: #ffffdf;
-}
-
-.status-banner.success {
-  background-color: #d4f7d4;
-  color: #005000;
-}
-
-.status-banner.warning {
-  background-color: #ffe6cc;
-  color: #803000;
-}
-
-.status-banner.error {
-  background-color: #ffd6d6;
-  color: #800000;
-}
-
-/* Component Grid */
-.component-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.component-card {
-  background: var(--win-gray);
-  border: 2px solid;
-  border-color: var(--win-light) var(--win-black) var(--win-black) var(--win-light);
-  box-shadow: inset 1px 1px 0 var(--win-light), inset -1px -1px 0 var(--win-dark);
-  padding: 6px 8px;
-}
-
-.comp-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 4px;
-  border-bottom: 1px solid var(--win-dark);
-  padding-bottom: 3px;
-}
-
-.comp-icon {
-  font-size: 14px;
-  margin-right: 4px;
-}
-
-.comp-title {
-  font-weight: bold;
-  font-size: 12px;
-  flex: 1;
-}
-
-.comp-body {
-  font-size: 11px;
-}
-
-.comp-path {
-  font-family: Consolas, monospace;
-  font-size: 10px;
-  background: #fff;
-  border: 1px solid var(--win-dark);
-  padding: 3px 5px;
-  margin: 4px 0;
-  word-break: break-all;
-  box-shadow: inset 1px 1px 0 var(--win-black);
-  max-height: 40px;
-  overflow-y: auto;
-}
-
-.comp-desc {
-  color: #404040;
-}
-
-/* Badges */
-.badge {
-  display: inline-block;
-  padding: 1px 6px;
-  font-weight: bold;
-  font-size: 10px;
-  border: 1px solid;
-}
-
-.badge-found {
-  background-color: #008000;
-  color: #ffffff;
-  border-color: #004000;
-}
-
-.badge-notfound {
-  background-color: #c00000;
-  color: #ffffff;
-  border-color: #600000;
-}
-
-.badge-pending {
-  background-color: #808080;
-  color: #ffffff;
-  border-color: #404040;
-}
-
-/* Lists and Tables */
-.filter-files-container {
-  margin-top: 8px;
-}
-
-.filter-list {
-  background: #ffffff;
-  max-height: 100px;
-  overflow-y: auto;
-  padding: 4px;
-}
-
-.filter-list li {
-  padding: 2px 4px;
-}
-
-.table-container {
-  max-height: 120px;
-  overflow-y: auto;
-  border: 1px solid var(--win-dark);
-  background: #ffffff;
-  box-shadow: inset 1px 1px 0 var(--win-black);
-  margin-top: 4px;
-}
-
-.win95-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 11px;
-}
-
-.win95-table th {
-  background: var(--win-gray);
-  border: 1px solid var(--win-dark);
-  padding: 2px 6px;
-  text-align: left;
-  position: sticky;
-  top: 0;
-  font-weight: bold;
-  box-shadow: inset 1px 1px 0 var(--win-light);
-}
-
-.win95-table td {
-  border-bottom: 1px solid #e0e0e0;
-  padding: 2px 6px;
-}
-
-.win95-table tr:hover {
-  background-color: #000080;
-  color: #ffffff;
-}
-
-.empty-state {
-  color: #707070;
-  font-style: italic;
-  padding: 6px;
-}
-
-/* Environment Cards */
-.env-actions-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 8px;
-}
-
-.env-timestamp {
-  color: #505050;
-  font-style: italic;
-}
-
-.notice-box {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-  padding: 6px 8px;
-  background: #ffffdf;
-  border: 1px solid var(--win-dark);
-  box-shadow: inset 1px 1px 0 var(--win-black);
-  margin-bottom: 10px;
-  line-height: 1.3;
-}
-
-.notice-box.info-blue {
-  background: #eef6ff;
-  border-color: #4080b0;
-}
-
-.notice-icon {
-  font-size: 14px;
-}
-
-.env-cards-container {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.env-card {
-  background: var(--win-gray);
-  border: 2px solid;
-  border-color: var(--win-light) var(--win-black) var(--win-black) var(--win-light);
-  box-shadow: inset 1px 1px 0 var(--win-light), inset -1px -1px 0 var(--win-dark);
-  padding: 6px 8px;
-}
-
-.env-card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  border-bottom: 1px solid var(--win-dark);
-  padding-bottom: 4px;
-  margin-bottom: 6px;
-}
-
-.env-card-title {
-  font-weight: bold;
-  font-size: 12px;
-}
-
-.env-prop {
-  margin-bottom: 4px;
-  line-height: 1.4;
-  word-break: break-all;
-}
-
-/* Terminal & Console */
-.terminal-container {
-  background: #000000;
-  border: 2px solid;
-  border-color: var(--win-dark) var(--win-light) var(--win-light) var(--win-dark);
-  box-shadow: inset 1px 1px 0 var(--win-black);
-  padding: 6px;
-  height: 180px;
-  overflow-y: auto;
-  margin-top: 4px;
-}
-
-.win95-terminal {
-  margin: 0;
-  font-family: Consolas, "Courier New", monospace;
-  font-size: 12px;
-  color: #00ff00;
-  white-space: pre-wrap;
-  word-break: break-all;
-  user-select: text;
-}
-
-.terminal-log {
-  color: #ffffff;
-}
-
-.cmd-exit-code {
-  font-weight: bold;
-  font-size: 11px;
-  margin-left: 10px;
-}
-
-/* Runtime & Selection List */
-.section-desc {
-  margin-bottom: 8px;
-  color: #303030;
-  line-height: 1.3;
-}
-
-.ant-options-list, .jdk-options-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-
-.runtime-option-card {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  background: #ffffff;
-  border: 1px solid var(--win-dark);
-  box-shadow: inset 1px 1px 0 var(--win-black);
-  padding: 6px 10px;
-  cursor: pointer;
-}
-
-.runtime-option-card:hover {
-  background-color: #f0f7ff;
-}
-
-.runtime-option-card.selected {
-  background-color: #e3efff;
-  border-color: #000080;
-}
-
-.runtime-radio {
-  margin-top: 3px;
-}
-
-.runtime-info {
-  flex: 1;
-}
-
-.runtime-name-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.runtime-name {
-  font-weight: bold;
-  font-size: 12px;
-}
-
-.badge-recommended {
-  background-color: #ff9900;
-  color: #000000;
-  font-weight: bold;
-  padding: 1px 5px;
-  border: 1px solid #995500;
-  font-size: 10px;
-}
-
-.runtime-path {
-  font-family: Consolas, monospace;
-  font-size: 10px;
-  color: #505050;
-  margin-top: 2px;
-}
-
-.runtime-status-msg {
-  color: #006000;
-  font-size: 11px;
-  margin-top: 2px;
-}
-
-.extract-panel {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: var(--win-gray);
-  border: 2px solid;
-  border-color: var(--win-light) var(--win-black) var(--win-black) var(--win-light);
-  padding: 8px 12px;
-  margin: 8px 0;
-  gap: 12px;
-}
-
-.extract-info {
-  flex: 1;
-}
-
-.extract-subtext {
-  color: #505050;
-  margin-top: 2px;
-}
-
-.test-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 6px;
-}
-
-.test-feedback {
-  font-weight: bold;
-}
-
-/* Win95 Taskbar */
-.win95-taskbar {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 28px;
-  background: var(--win-gray);
-  border-top: 2px solid var(--win-light);
-  display: flex;
-  align-items: center;
-  padding: 2px 4px;
-  z-index: 100;
-}
-
-.win95-start-btn {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  height: 22px;
-  padding: 0 8px;
-  font-weight: bold;
-  font-size: 11px;
-  font-family: inherit;
-  cursor: pointer;
-  background: var(--win-gray);
-  border: 2px solid;
-  border-color: var(--win-light) var(--win-black) var(--win-black) var(--win-light);
-  box-shadow: inset 1px 1px 0 var(--win-light), inset -1px -1px 0 var(--win-dark);
-}
-
-.win95-start-btn:active {
-  border-color: var(--win-black) var(--win-light) var(--win-light) var(--win-black);
-  box-shadow: inset 1px 1px 0 var(--win-black), inset -1px -1px 0 var(--win-light);
-}
-
-.win95-flag-icon {
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='1' y='1' width='6' height='6' fill='%23ff0000'/><rect x='9' y='1' width='6' height='6' fill='%2300ff00'/><rect x='1' y='9' width='6' height='6' fill='%230000ff'/><rect x='9' y='9' width='6' height='6' fill='%23ffff00'/></svg>") no-repeat center;
-  background-size: contain;
-}
-
-.taskbar-divider {
-  width: 2px;
-  height: 20px;
-  border-left: 1px solid var(--win-dark);
-  border-right: 1px solid var(--win-light);
-  margin: 0 6px;
-}
-
-.taskbar-windows {
-  flex: 1;
-  display: flex;
-  gap: 4px;
-}
-
-.taskbar-window-btn {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  height: 22px;
-  max-width: 160px;
-  padding: 0 8px;
-  font-family: inherit;
-  font-size: 11px;
-  background: var(--win-gray);
-  border: 2px solid;
-  border-color: var(--win-black) var(--win-light) var(--win-light) var(--win-black);
-  box-shadow: inset 1px 1px 0 var(--win-black), inset -1px -1px 0 var(--win-light);
-  font-weight: bold;
-}
-
-.taskbar-tray {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 22px;
-  padding: 0 8px;
-  border: 1px solid var(--win-dark);
-  border-top-color: var(--win-dark);
-  border-left-color: var(--win-dark);
-  border-bottom-color: var(--win-light);
-  border-right-color: var(--win-light);
-  box-shadow: inset 1px 1px 0 var(--win-black);
-}
-
-.tray-clock {
-  font-family: inherit;
-  font-size: 11px;
-}
-
-/* Modals */
-.win95-modal-backdrop {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: rgba(0, 0, 0, 0.4);
-  display: flex;
+.project-tab-close {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
-}
-
-.win95-modal-window {
-  width: 380px;
-  max-width: 90vw;
-  box-shadow: 3px 3px 0 var(--win-black);
-}
-
-.modal-body {
-  padding: 12px;
-}
-
-.about-content {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-}
-
-.about-icon {
-  font-size: 32px;
-}
-
-.about-details h3 {
-  margin: 0 0 4px 0;
-  font-size: 13px;
-}
-
-.about-details p {
-  margin: 2px 0;
-}
-
-.about-details hr {
-  border: none;
-  border-top: 1px solid var(--win-dark);
-  border-bottom: 1px solid var(--win-light);
-  margin: 6px 0;
-}
-
-.small-text {
+  width: 14px;
+  height: 14px;
   font-size: 10px;
-  color: #404040;
+  font-weight: bold;
+  line-height: 1;
+  color: #444444;
+  background: #c0c0c0;
+  box-shadow: inset 1px 1px #ffffff, inset -1px -1px #0a0a0a;
 }
 
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 12px;
+.project-tab-close:hover {
+  background: #cc0000;
+  color: #ffffff;
 }
 
+.btn-add-tab {
+  height: 22px !important;
+  min-height: 22px !important;
+  min-width: auto !important;
+  padding: 0 10px !important;
+  font-size: 11px !important;
+  flex-shrink: 0;
+}
+
+/* ==========================================================================
+   1. TOP TOOLBAR (PROJECT + HISTORY COMBINED + BUILD CONTROLS)
+   ========================================================================== */
+  .top-toolbar-box {
+    flex-shrink: 0;
+    background-color: var(--win-gray);
+  }
+
+  .toolbar-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .toolbar-row:not(:last-child) {
+    margin-bottom: 6px;
+  }
+
+  .row-label {
+    font-weight: bold;
+    font-size: 11px;
+    white-space: nowrap;
+    width: 55px;
+    flex-shrink: 0;
+  }
+
+  .row-label-short {
+    width: auto;
+    margin-left: 6px;
+  }
+
+  .input-path {
+    flex: 1;
+    min-width: 160px;
+    height: 22px;
+    padding: 2px 6px;
+    font-size: 11px;
+    box-sizing: border-box;
+  }
+
+  .select-history {
+    flex: 0.9;
+    min-width: 150px;
+    max-width: 340px;
+    height: 22px;
+    font-size: 11px;
+    box-sizing: border-box;
+  }
+
+  .select-target {
+    flex: 0 0 250px;
+    height: 23px;
+    font-size: 11px;
+    font-weight: bold;
+    box-sizing: border-box;
+  }
+
+  .btn-build {
+    font-weight: bold !important;
+    height: 24px;
+    padding: 0 14px !important;
+    color: #000080 !important;
+  }
+
+  .btn-build:disabled {
+    color: #777777 !important;
+  }
+
+  .build-status-wrapper {
+    margin-left: 4px;
+  }
+
+  /* ==========================================================================
+   2. MAIN SPLIT VIEW (CMD & BATCH FILES EXPLORER)
+   ========================================================================== */
+  .main-split-view {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    gap: 6px;
+  }
+
+  .split-col {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .console-col {
+    flex: 1.05;
+  }
+
+  .bat-col {
+    flex: 1.35;
+  }
+
+  .col-legend {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: calc(100% - 10px);
+  }
+
+  .col-legend span {
+    font-size: 11px;
+    font-weight: bold;
+  }
+
+  .legend-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .btn-xs {
+    font-size: 10px !important;
+    padding: 1px 6px !important;
+    height: 18px !important;
+    min-height: 18px !important;
+    min-width: auto !important;
+  }
+
+  .btn-sm {
+    font-size: 11px !important;
+    padding: 0 8px !important;
+    height: 23px !important;
+    min-width: auto !important;
+    flex-shrink: 0;
+  }
+
+  /* Console / Terminal Area - Pure Black, No Text Border/Box-Shadow */
+  .console-wrapper {
+    flex: 1;
+    min-height: 0;
+    background-color: #000000 !important;
+    border: 1px solid #666666 !important;
+    box-shadow: none !important;
+    padding: 8px !important;
+    overflow: auto;
+    box-sizing: border-box;
+  }
+
+  .retro-terminal {
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+    background: transparent !important;
+    font-family: "Consolas", "Courier New", monospace !important;
+    font-size: 12px !important;
+    line-height: 1.4 !important;
+    color: #00ff66 !important;
+    white-space: pre-wrap;
+    word-break: break-all;
+    user-select: text;
+  }
+
+
+    /* Batch Files Control Bars (Folder Path & Search Filter) */
+    .bat-control-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 4px;
+    }
+
+      .bar-label {
+        font-weight: bold;
+        font-size: 11px;
+        width: 44px;
+        flex-shrink: 0;
+      }
+
+      .bar-input {
+        flex: 1;
+        min-width: 0;
+        height: 21px;
+        padding: 2px 6px;
+        font-size: 11px;
+        box-sizing: border-box;
+      }
+
+      .text-truncate {
+        display: inline-block;
+        max-width: 85%;
+        vertical-align: bottom;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      /* Explorer Table */
+      .explorer-table-container {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        background-color: #ffffff;
+        border: 1px solid #808080;
+      }
+
+      .bat-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11px;
+      }
+
+      .bat-table th {
+        position: sticky;
+        top: 0;
+        background: var(--win-gray);
+        padding: 3px 6px;
+        border-right: 1px solid #808080;
+        border-bottom: 1px solid #808080;
+        text-align: left;
+        font-size: 11px;
+        font-weight: bold;
+        z-index: 2;
+        box-shadow: inset 1px 1px #ffffff, inset -1px -1px #808080;
+      }
+
+      .bat-table td {
+        padding: 3px 6px;
+        border-bottom: 1px solid #e0e0e0;
+        white-space: nowrap;
+        font-size: 11px;
+      }
+
+      .bat-table tbody tr:hover {
+        background-color: #000080;
+        color: #ffffff;
+      }
+
+      .bat-table tbody tr:hover td {
+        color: #ffffff;
+      }
+
+      .bat-table tbody tr:hover .btn-bat-run {
+        color: #000000 !important;
+      }
+
+      .file-name-cell {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .file-icon {
+        font-size: 12px;
+      }
+
+      .btn-bat-run {
+        font-size: 10px !important;
+        padding: 1px 6px !important;
+        height: 18px !important;
+        min-height: 18px !important;
+        min-width: auto !important;
+      }
+
+      .empty-row {
+        text-align: center;
+        color: #666666;
+        padding: 24px 8px !important;
+        font-style: italic;
+      }
+
+      /* ==========================================================================
+   3. FOOTER / STATUS BAR (COMPACT & CLICKABLE)
+   ========================================================================== */
+      .app-footer-bar {
+        flex-shrink: 0;
+        height: 24px;
+        margin-top: 0;
+        display: flex;
+        align-items: stretch;
+        padding: 1px;
+      }
+
+      .footer-clickable {
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0 8px !important;
+        transition: background-color 0.1s;
+      }
+
+      .footer-clickable:hover {
+        background-color: #dfdfdf;
+        box-shadow: inset 1px 1px #808080, inset -1px -1px #ffffff;
+      }
+
+      .footer-icon {
+        font-size: 12px;
+      }
+
+      .footer-label {
+        font-size: 10.5px;
+      }
+
+      .footer-val {
+        font-size: 10.5px;
+      }
+
+      .footer-arrow {
+        font-size: 9px;
+        color: #555555;
+        margin-left: 2px;
+      }
+
+      #footer-ant-btn {
+        flex: 0 0 220px;
+      }
+
+      #footer-java-btn {
+        flex: 0 0 240px;
+      }
+
+      .footer-settings {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0 8px !important;
+      }
+
+      .footer-pill {
+        width: 100px;
+        flex: none;
+        text-align: center;
+        font-weight: bold;
+      }
+
+      /* ==========================================================================
+   4. BADGES & RETRO CONTROLS
+   ========================================================================== */
+      .badge {
+        display: inline-block;
+        padding: 2px 6px;
+        font-size: 10px;
+        font-weight: bold;
+        text-transform: uppercase;
+        border-radius: 1px;
+        flex-shrink: 0;
+      }
+
+      .badge-gray {
+        background-color: #808080;
+        color: #ffffff;
+      }
+
+      .badge-green {
+        background-color: #008000;
+        color: #ffffff;
+      }
+
+      .badge-red {
+        background-color: #cc0000;
+        color: #ffffff;
+      }
+
+      .badge-yellow {
+        background-color: #cc8800;
+        color: #ffffff;
+      }
+
+      .badge-blue {
+        background-color: #000080;
+        color: #ffffff;
+      }
+
+      .btn-bold {
+        font-weight: bold;
+      }
+
+      .text-mono {
+        font-family: "Consolas", monospace !important;
+        font-size: 10.5px;
+        word-break: break-all;
+      }
+
+      .text-muted {
+        color: #555555;
+        font-size: 10px;
+      }
+
+      /* ==========================================================================
+   5. WIN95 MODALS & BACKDROP
+   ========================================================================== */
+      .win95-modal-backdrop {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background-color: rgba(0, 0, 0, 0.4);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 9999;
+      }
+
+      .win95-modal-window {
+        box-shadow: 2px 2px 0 #000000;
+      }
+
+      .modal-medium {
+        width: 540px;
+        max-width: 95vw;
+        box-sizing: border-box;
+      }
+
+      .modal-alert {
+        width: 380px;
+        max-width: 90vw;
+      }
+
+      .modal-content-box {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 8px 10px 10px 10px;
+        box-sizing: border-box;
+        max-width: 100%;
+        overflow-x: hidden;
+      }
+
+      .modal-info-table {
+        width: 100%;
+        font-size: 11px;
+        border-collapse: collapse;
+      }
+
+      .modal-info-table td {
+        padding: 3px 4px;
+        vertical-align: top;
+      }
+
+      .modal-info-table td.lbl {
+        width: 105px;
+        font-weight: bold;
+        white-space: nowrap;
+      }
+
+      .modal-choice-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 4px;
+        width: 100%;
+        box-sizing: border-box;
+      }
+
+      .modal-choice-row label {
+        font-weight: bold;
+        width: 40px;
+        flex-shrink: 0;
+      }
+
+      .modal-choice-row select {
+        flex: 1 1 0;
+        width: 0;
+        min-width: 0;
+        max-width: 100%;
+        height: 23px;
+        box-sizing: border-box;
+      }
+
+      .modal-desc-note {
+        margin-top: 6px;
+        padding-left: 2px;
+      }
+
+      .modal-bottom-bar {
+        display: flex;
+        align-items: center;
+        margin-top: 4px;
+      }
+
+      .flex-fill {
+        flex: 1;
+      }
+
+      .flex-spacer {
+        flex: 1;
+      }
+
+      /* Alert Modal Inner */
+      .modal-flex-content {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 4px;
+      }
+
+      .modal-big-icon {
+        font-size: 26px;
+      }
+
+      .modal-msg-text {
+        font-size: 11px;
+        line-height: 1.4;
+        word-break: break-word;
+      }
+
+      .modal-actions {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 8px;
+      }

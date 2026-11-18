@@ -1,9 +1,11 @@
 #[cfg(test)]
 mod tests {
     use crate::modules::ant_manager::*;
+    use crate::modules::builder::*;
     use crate::modules::environment::*;
     use crate::modules::jdk_manager::*;
     use crate::modules::project::*;
+    use crate::modules::settings::*;
 
     #[test]
     fn test_environment_check() {
@@ -36,6 +38,13 @@ mod tests {
         println!("System ant: {:?}", res.current_system_ant);
         println!("Bundled ants: {:?}", res.bundled_ants);
         assert!(!res.available_options.is_empty());
+        if let Some(sys_ant) = res.current_system_ant {
+            if let Some(exe) = sys_ant.executable_path {
+                let test_res = test_ant_executable(&exe);
+                println!("Test ant result: {:?}", test_res);
+                assert!(test_res.success);
+            }
+        }
     }
 
     #[test]
@@ -50,5 +59,33 @@ mod tests {
             );
         }
         assert!(!res.jdks.is_empty());
+    }
+
+    #[test]
+    fn test_settings() {
+        let path = get_settings_file_path();
+        println!("Settings file path: {}", path.display());
+        let original = load_settings();
+        let updated = add_project_to_history(r"D:\vinx_tools\bach_helper\docs").unwrap();
+        assert_eq!(
+            updated.last_project,
+            Some(r"D:\vinx_tools\bach_helper\docs".to_string())
+        );
+        // Restore user's real project as last_project if present in history
+        let mut restored = original;
+        restored.history.retain(|p| p != r"D:\vinx_tools\bach_helper\docs");
+        if let Some(first) = restored.history.first().cloned() {
+            restored.last_project = Some(first);
+        }
+        let _ = save_settings(&restored);
+        println!("Restored settings: {:?}", restored);
+    }
+
+    #[test]
+    fn test_builder_inspection_docs() {
+        let inspection = inspect_target_files(r"D:\vinx_tools\bach_helper\docs", "development-package");
+        println!("Inspection docs: {:?}", inspection);
+        assert!(inspection.properties_file.is_some());
+        assert!(inspection.base_directory.is_some());
     }
 }

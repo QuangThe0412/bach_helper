@@ -3,396 +3,305 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Batch Helper - Windows 95</title>
-    <script type="module" crossorigin src="/assets/index-xMpwYY8a.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-kEq9SLyN.css">
+    <title>Batch Helper</title>
+    <script type="module" crossorigin src="/assets/index-DKyIdMlf.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-BQNHm_uW.css">
   </head>
   <body>
-    <!-- Windows 95 Desktop Container -->
-    <div class="desktop">
-      <!-- Main Application Window -->
-      <div class="window main-app-window">
-        <!-- Title Bar -->
-        <div class="title-bar">
-          <div class="title-bar-text">
-            <span class="win95-icon win95-icon-app"></span>
-            <strong>Batch Helper</strong> - Java & Apache Ant Project Manager [Win95]
-          </div>
-          <div class="title-bar-controls">
-            <button aria-label="Minimize" id="btn-minimize"></button>
-            <button aria-label="Maximize" id="btn-maximize"></button>
-            <button aria-label="Close" id="btn-close"></button>
-          </div>
-        </div>
+    <div class="app-container">
 
-        <!-- Menu Bar -->
-        <div class="win95-menubar">
-          <div class="menu-item" id="menu-file"><u>F</u>ile</div>
-          <div class="menu-item" id="menu-view"><u>V</u>iew</div>
-          <div class="menu-item" id="menu-tools"><u>T</u>ools</div>
-          <div class="menu-item" id="menu-help"><u>H</u>elp</div>
-        </div>
-
-        <!-- Window Body -->
-        <div class="window-body">
-          <!-- Win95 Tabs Navigation -->
-          <menu role="tablist" class="win95-tabs">
-            <li role="tab" aria-selected="true" data-tab="tab-project">
-              <a href="#tab-project">📁 Project Selection & Structure</a>
-            </li>
-            <li role="tab" aria-selected="false" data-tab="tab-env">
-              <a href="#tab-env">⚙️ Build Environment (CMD)</a>
-            </li>
-            <li role="tab" aria-selected="false" data-tab="tab-runtime">
-              <a href="#tab-runtime">☕ JDK & Apache Ant Manager</a>
-            </li>
-            <li role="tab" aria-selected="false" data-tab="tab-terminal">
-              <a href="#tab-terminal">📟 CMD Console & Logs</a>
-            </li>
-          </menu>
-
-          <!-- TAB 1: PROJECT SELECTION & SCAN -->
-          <article role="tabpanel" id="tab-project" class="tab-content active">
-            <!-- Project Selection Fieldset -->
-            <fieldset class="win95-box">
-              <legend><b>Project Selection</b></legend>
-              <div class="field-row-stacked">
-                <label for="project-path-input">Target Java Ant Project Directory:</label>
-                <div class="path-input-group">
-                  <input
-                    id="project-path-input"
-                    type="text"
-                    placeholder="e.g. D:\vinx_tools\bach_helper\docs or choose folder..."
-                    value="D:\vinx_tools\bach_helper\docs"
-                  />
-                  <button id="btn-browse-folder" class="win95-btn">
-                    Browse...
-                  </button>
-                  <button id="btn-scan-project" class="win95-btn btn-highlight">
-                    🔍 Scan Project
-                  </button>
-                </div>
-              </div>
-              <div class="quick-sample-row">
-                <span class="sample-label">Quick load preset:</span>
-                <button id="btn-load-sample" class="win95-btn btn-small">
-                  Sample Project (docs folder)
-                </button>
-              </div>
-            </fieldset>
-
-            <!-- Project Structure Status -->
-            <fieldset class="win95-box">
-              <legend><b>Project Information & Structure Inspection</b></legend>
-              <div id="project-scan-status-banner" class="status-banner info">
-                Ready to scan. Click <b>"Scan Project"</b> to verify directory components.
-              </div>
-
-              <div class="component-grid">
-                <!-- Build Folder Card -->
-                <div class="component-card" id="card-build-folder">
-                  <div class="comp-header">
-                    <span class="comp-icon">📁</span>
-                    <span class="comp-title">Folder 'build'</span>
-                    <span class="badge badge-pending" id="badge-build-folder">NOT SCANNED</span>
-                  </div>
-                  <div class="comp-body">
-                    <div class="comp-path" id="path-build-folder">Path: -</div>
-                    <div class="comp-desc">Container directory for build scripts and properties.</div>
-                  </div>
-                </div>
-
-                <!-- Build.xml Card -->
-                <div class="component-card" id="card-build-xml">
-                  <div class="comp-header">
-                    <span class="comp-icon">📄</span>
-                    <span class="comp-title">File 'build.xml'</span>
-                    <span class="badge badge-pending" id="badge-build-xml">NOT SCANNED</span>
-                  </div>
-                  <div class="comp-body">
-                    <div class="comp-path" id="path-build-xml">Path: -</div>
-                    <div class="comp-desc" id="desc-build-xml">Apache Ant build script definition.</div>
-                  </div>
-                </div>
-
-                <!-- Filter Folder Card -->
-                <div class="component-card" id="card-filter-folder">
-                  <div class="comp-header">
-                    <span class="comp-icon">📂</span>
-                    <span class="comp-title">Folder 'filter'</span>
-                    <span class="badge badge-pending" id="badge-filter-folder">NOT SCANNED</span>
-                  </div>
-                  <div class="comp-body">
-                    <div class="comp-path" id="path-filter-folder">Path: -</div>
-                    <div class="comp-desc" id="desc-filter-folder">Environment filter properties.</div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Filter Files Listbox -->
-              <div class="field-row-stacked filter-files-container" id="container-filter-files">
-                <label><b>Detected Filter Properties Files (*.properties):</b></label>
-                <ul class="tree-view filter-list" id="list-filter-files">
-                  <li class="empty-state">No scan performed yet.</li>
-                </ul>
-              </div>
-
-              <!-- Ant Targets Listbox -->
-              <div class="field-row-stacked ant-targets-container" id="container-ant-targets">
-                <label><b>Discovered Ant Targets from build.xml:</b></label>
-                <div class="table-container">
-                  <table class="win95-table" id="table-ant-targets">
-                    <thead>
-                      <tr>
-                        <th style="width: 40px">#</th>
-                        <th>Target Name</th>
-                        <th>Status</th>
-                        <th>Type</th>
-                      </tr>
-                    </thead>
-                    <tbody id="tbody-ant-targets">
-                      <tr>
-                        <td colspan="4" class="empty-state">Targets will appear here after scanning build.xml.</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </fieldset>
-          </article>
-
-          <!-- TAB 2: ENVIRONMENT CHECK (CMD) -->
-          <article role="tabpanel" id="tab-env" class="tab-content">
-            <fieldset class="win95-box">
-              <legend><b>Windows CMD Environment Inspection</b></legend>
-              <div class="env-actions-row">
-                <button id="btn-run-env-check" class="win95-btn btn-highlight">
-                  ⚡ Run Environment Check via CMD
-                </button>
-                <span id="env-check-timestamp" class="env-timestamp">Last checked: Never</span>
-              </div>
-              <div class="notice-box">
-                <span class="notice-icon">ℹ️</span>
-                <span>Runs native Windows CMD commands (<code>ant -version</code>, <code>where ant</code>, <code>echo %ANT_HOME%</code>, <code>java -version</code>, <code>where java</code>, <code>echo %JAVA_HOME%</code>, <code>javac -version</code>, <code>where javac</code>) to collect stdout/stderr without altering system environment.</span>
-              </div>
-
-              <!-- Environment Cards -->
-              <div class="env-cards-container">
-                <!-- Apache Ant Card -->
-                <div class="env-card" id="card-env-ant">
-                  <div class="env-card-header">
-                    <span class="env-card-title">🐜 Apache Ant</span>
-                    <span class="badge badge-pending" id="badge-env-ant">CHECKING...</span>
-                  </div>
-                  <div class="env-card-content">
-                    <div class="env-prop"><b>Version:</b> <span id="val-env-ant-version">-</span></div>
-                    <div class="env-prop"><b>ANT_HOME:</b> <span id="val-env-ant-home">-</span></div>
-                    <div class="env-prop"><b>Executables:</b> <span id="val-env-ant-execs">-</span></div>
-                  </div>
-                </div>
-
-                <!-- Java Runtime Card -->
-                <div class="env-card" id="card-env-java">
-                  <div class="env-card-header">
-                    <span class="env-card-title">☕ Java Runtime (java.exe)</span>
-                    <span class="badge badge-pending" id="badge-env-java">CHECKING...</span>
-                  </div>
-                  <div class="env-card-content">
-                    <div class="env-prop"><b>Version:</b> <span id="val-env-java-version">-</span></div>
-                    <div class="env-prop"><b>JAVA_HOME:</b> <span id="val-env-java-home">-</span></div>
-                    <div class="env-prop"><b>Executables:</b> <span id="val-env-java-execs">-</span></div>
-                  </div>
-                </div>
-
-                <!-- Java Compiler Card -->
-                <div class="env-card" id="card-env-javac">
-                  <div class="env-card-header">
-                    <span class="env-card-title">🔨 Java Compiler (javac.exe)</span>
-                    <span class="badge badge-pending" id="badge-env-javac">CHECKING...</span>
-                  </div>
-                  <div class="env-card-content">
-                    <div class="env-prop"><b>Version:</b> <span id="val-env-javac-version">-</span></div>
-                    <div class="env-prop"><b>Executables:</b> <span id="val-env-javac-execs">-</span></div>
-                    <div class="env-prop"><b>JDK Status:</b> <span id="val-env-javac-status">-</span></div>
-                  </div>
-                </div>
-              </div>
-            </fieldset>
-
-            <!-- Raw CMD Output Viewer -->
-            <fieldset class="win95-box">
-              <legend><b>Raw CMD Execution Details (Stdout / Stderr)</b></legend>
-              <div class="field-row">
-                <label for="select-cmd-view">Select Command to View:</label>
-                <select id="select-cmd-view">
-                  <option value="ant_version">ant -version</option>
-                  <option value="where_ant">where ant</option>
-                  <option value="echo_ant_home">echo %ANT_HOME%</option>
-                  <option value="java_version">java -version</option>
-                  <option value="where_java">where java</option>
-                  <option value="echo_java_home">echo %JAVA_HOME%</option>
-                  <option value="javac_version">javac -version</option>
-                  <option value="where_javac">where javac</option>
-                </select>
-                <span class="cmd-exit-code" id="cmd-exit-code-badge">Exit Code: -</span>
-              </div>
-              <div class="terminal-container">
-                <pre class="win95-terminal" id="terminal-cmd-output">Executing environment probe...</pre>
-              </div>
-            </fieldset>
-          </article>
-
-          <!-- TAB 3: JDK & APACHE ANT MANAGER -->
-          <article role="tabpanel" id="tab-runtime" class="tab-content">
-            <!-- Apache Ant Selection Section -->
-            <fieldset class="win95-box">
-              <legend><b>1. Apache Ant Selection & Setup</b></legend>
-              <div class="section-desc">
-                Select which Apache Ant binary to use for building projects. You can choose the system installed Ant or the bundled Ant in <code>libs</code>.
-              </div>
-              <div class="ant-options-list" id="ant-options-container">
-                <div class="loading-state">Scanning Ant installations...</div>
-              </div>
-
-              <!-- Bundled Ant Extraction Panel -->
-              <div class="extract-panel" id="panel-extract-ant">
-                <div class="extract-info">
-                  <b>📦 Bundled Ant Archive:</b> <code>libs\apache-ant-1.10.18-bin.zip</code>
-                  <div class="extract-subtext">Clicking the button will safely unzip Ant into <code>libs\apache-ant-1.10.18</code> for local use.</div>
-                </div>
-                <button id="btn-extract-ant" class="win95-btn">
-                  📂 Extract & Setup Bundled Ant
-                </button>
-              </div>
-
-              <div class="test-row">
-                <button id="btn-test-active-ant" class="win95-btn">
-                  🧪 Test Selected Ant Binary
-                </button>
-                <span id="test-ant-feedback" class="test-feedback"></span>
-              </div>
-            </fieldset>
-
-            <!-- JDK Selection Section -->
-            <fieldset class="win95-box">
-              <legend><b>2. JDK Selection & Configuration</b></legend>
-              <div class="section-desc">
-                Select the JDK to use for compiling and running builds. <b>JDK 25</b> (found in <code>libs</code>) is prioritized and recommended.
-              </div>
-              <div class="jdk-options-list" id="jdk-options-container">
-                <div class="loading-state">Scanning JDKs in libs and system...</div>
-              </div>
-
-              <div class="test-row">
-                <button id="btn-test-active-jdk" class="win95-btn">
-                  🧪 Test Selected Java Runtime
-                </button>
-                <span id="test-jdk-feedback" class="test-feedback"></span>
-              </div>
-
-              <div class="notice-box info-blue">
-                <span class="notice-icon">🛡️</span>
-                <span><b>Safety Guarantee:</b> All selections apply only within Batch Helper during execution. System-wide <code>JAVA_HOME</code> and <code>PATH</code> remain unmodified.</span>
-              </div>
-            </fieldset>
-          </article>
-
-          <!-- TAB 4: CMD CONSOLE & LOGS -->
-          <article role="tabpanel" id="tab-terminal" class="tab-content">
-            <fieldset class="win95-box">
-              <legend><b>Interactive CMD Command Tester (Read-only System Probes)</b></legend>
-              <div class="field-row-stacked">
-                <label for="input-custom-cmd">Enter Windows CMD Command:</label>
-                <div class="path-input-group">
-                  <input
-                    id="input-custom-cmd"
-                    type="text"
-                    value="where ant & where java"
-                    placeholder="e.g. dir libs or echo %PATH%"
-                  />
-                  <button id="btn-run-custom-cmd" class="win95-btn btn-highlight">
-                    Execute CMD
-                  </button>
-                </div>
-              </div>
-              <div class="terminal-container">
-                <pre class="win95-terminal" id="terminal-custom-cmd">Type a command above and click "Execute CMD".</pre>
-              </div>
-            </fieldset>
-
-            <fieldset class="win95-box">
-              <legend><b>Batch Helper Activity Log</b></legend>
-              <div class="terminal-container" style="height: 150px">
-                <pre class="win95-terminal terminal-log" id="terminal-app-log">Application started. Ready.</pre>
-              </div>
-              <div class="field-row" style="margin-top: 6px">
-                <button id="btn-clear-log" class="win95-btn btn-small">Clear Log</button>
-              </div>
-            </fieldset>
-          </article>
-        </div>
-
-        <!-- Status Bar -->
-        <div class="status-bar">
-          <p class="status-bar-field" id="sb-status">Ready</p>
-          <p class="status-bar-field" id="sb-jdk">JDK: Detecting...</p>
-          <p class="status-bar-field" id="sb-ant">Ant: Detecting...</p>
-          <p class="status-bar-field" id="sb-time">00:00:00</p>
-        </div>
-      </div>
-
-      <!-- Windows 95 Desktop Taskbar -->
-      <div class="win95-taskbar">
-        <button class="win95-start-btn" id="btn-start-menu">
-          <span class="win95-flag-icon"></span>
-          <b>Start</b>
+      <!-- 0. MULTI-PROJECT TAB BAR -->
+      <div class="project-tabs-bar">
+        <div id="project-tabs-list" class="project-tabs-list"></div>
+        <button id="btn-add-tab" class="win95-btn btn-add-tab btn-bold" title="Open a new project tab">
+          + New Tab
         </button>
-        <div class="taskbar-divider"></div>
-        <div class="taskbar-windows">
-          <button class="taskbar-window-btn active" id="taskbar-app-btn">
-            <span class="win95-icon win95-icon-app-small"></span>
-            Batch Helper
+      </div>
+
+      <!-- 1. PROJECT & TARGET BUILD TOOLBAR -->
+      <fieldset class="win95-box top-toolbar-box">
+        <legend><b>Project</b></legend>
+
+        <!-- Row 1: Combined Path & History -->
+        <div class="toolbar-row">
+          <label for="project-path-input" class="row-label">Path:</label>
+          <input
+            id="project-path-input"
+            type="text"
+            class="input-path"
+            placeholder="Select or enter project directory path..."
+          />
+          <button id="btn-browse-folder" class="win95-btn btn-bold">
+            Browse...
           </button>
-        </div>
-        <div class="taskbar-tray">
-          <span class="tray-icon">🔊</span>
-          <span class="tray-clock" id="tray-clock">00:00 AM</span>
-        </div>
-      </div>
-    </div>
 
-    <!-- Retro Win95 Modal / About Box -->
-    <div class="win95-modal-backdrop" id="about-modal" style="display: none">
-      <div class="window win95-modal-window">
-        <div class="title-bar">
-          <div class="title-bar-text">About Batch Helper</div>
-          <div class="title-bar-controls">
-            <button aria-label="Close" id="btn-close-about"></button>
+          <label for="select-project-history" class="row-label row-label-short">History:</label>
+          <select id="select-project-history" class="select-history">
+            <option value="">(No history)</option>
+          </select>
+        </div>
+
+        <!-- Row 2: Target Selection & Build Button -->
+        <div class="toolbar-row build-control-row">
+          <label for="select-ant-target" class="row-label">Target:</label>
+          <select id="select-ant-target" class="select-target">
+            <option value="">-- Select a project to load targets --</option>
+          </select>
+
+          <button id="btn-run-build" class="win95-btn btn-build btn-bold" disabled>
+            Build
+          </button>
+
+          <div class="build-status-wrapper">
+            <span id="badge-build-status" class="badge badge-gray">READY</span>
           </div>
         </div>
-        <div class="window-body modal-body">
-          <div class="about-content">
-            <div class="about-icon">🖥️</div>
-            <div class="about-details">
-              <h3>Batch Helper - Windows 95 Edition</h3>
-              <p>Version 1.0.0 (Tauri + Rust)</p>
-              <p>Designed for Java & Apache Ant Project Management.</p>
-              <hr />
-              <p class="small-text">
-                Safe, standalone environment inspection without modifying system PATH or JAVA_HOME.
-              </p>
+      </fieldset>
+
+      <!-- 2. MAIN SPLIT VIEW: CMD & BATCH FILES EXPLORER -->
+      <div class="main-split-view">
+
+        <!-- LEFT COLUMN: CMD REALTIME CONSOLE -->
+        <fieldset class="win95-box split-col console-col">
+          <legend class="col-legend">
+            <span>CMD</span>
+            <button id="btn-open-build-dir" class="win95-btn btn-xs" title="Open build.xml folder in Explorer">
+              Open Build Folder
+            </button>
+          </legend>
+
+          <div class="console-wrapper">
+            <div id="build-console-output" class="retro-terminal"></div>
+          </div>
+        </fieldset>
+
+        <!-- RIGHT COLUMN: BATCH FILES EXPLORER -->
+        <fieldset class="win95-box split-col bat-col">
+          <legend class="col-legend">
+            <span>Batch Files (batch/batfiles)</span>
+            <div class="legend-actions">
+              <button id="btn-open-log" class="win95-btn btn-xs" title="Open batchApp.log">
+                Open File Log
+              </button>
+              <button id="btn-open-bat-dir" class="win95-btn btn-xs" title="Open batch folder in Windows Explorer" disabled>
+                Open Folder
+              </button>
             </div>
+          </legend>
+
+          <!-- Batch Folder Path Selector (Editable + Browse fallback) -->
+          <div class="bat-control-bar">
+            <label for="input-bat-folder" class="bar-label">Folder:</label>
+            <input
+              id="input-bat-folder"
+              type="text"
+              class="bar-input"
+              placeholder="Auto-detected from target .properties or browse custom folder..."
+            />
+            <button id="btn-browse-bat-folder" class="win95-btn btn-xs" title="Browse custom batch files folder">
+              Browse...
+            </button>
           </div>
-          <div class="modal-actions">
-            <button class="win95-btn" id="btn-ok-about">OK</button>
+
+          <!-- Search / Filter Bar -->
+          <div class="bat-control-bar">
+            <label for="input-bat-filter" class="bar-label">Filter:</label>
+            <input
+              id="input-bat-filter"
+              type="text"
+              class="bar-input"
+              placeholder="Search / filter .bat files by name..."
+            />
+            <span id="meta-bat-count" class="badge badge-blue">0 files</span>
+          </div>
+
+          <!-- Explorer Table (No Size Column) -->
+          <div class="explorer-table-container">
+            <table class="win95-table bat-table">
+              <thead>
+                <tr>
+                  <th style="width: 28px; text-align: center;">#</th>
+                  <th>File Name (.bat)</th>
+                  <th style="width: 135px; text-align: center;">Modified Date</th>
+                  <th style="width: 65px; text-align: center;">Action</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-bat-files">
+                <tr>
+                  <td colspan="4" class="empty-row">
+                    No .bat files loaded. Select a project/target or browse a folder.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </fieldset>
+
+      </div>
+
+      <!-- 3. FOOTER / STATUS BAR -->
+      <div class="status-bar app-footer-bar">
+        <div id="footer-ant-btn" class="status-bar-field footer-clickable" title="Click to configure &amp; inspect Apache Ant">
+          <span class="footer-label"><b>Ant:</b></span>
+          <span id="footer-ant-val" class="footer-val">Checking...</span>
+          <span class="footer-arrow">&#9662;</span>
+        </div>
+
+        <div id="footer-java-btn" class="status-bar-field footer-clickable" title="Click to configure &amp; inspect Java / JDK">
+          <span class="footer-label"><b>Java:</b></span>
+          <span id="footer-java-val" class="footer-val">Checking...</span>
+          <span class="footer-arrow">&#9662;</span>
+        </div>
+
+        <div id="footer-settings-info" class="status-bar-field footer-settings" title="AppData history.json file path">
+          <span id="footer-settings-val" class="footer-val text-truncate">History: Loading...</span>
+        </div>
+
+        <div id="footer-status-pill" class="status-bar-field footer-pill">
+          <span id="footer-status-text">Ready</span>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- MODAL 1: APACHE ANT CONFIGURATION -->
+    <div id="modal-ant" class="win95-modal-backdrop" style="display: none;">
+      <div class="window win95-modal-window modal-medium">
+        <div class="title-bar">
+          <div class="title-bar-text">Apache Ant Configuration</div>
+          <div class="title-bar-controls">
+            <button aria-label="Close" id="btn-close-modal-ant"></button>
+          </div>
+        </div>
+        <div class="window-body modal-content-box">
+          <fieldset class="win95-box">
+            <legend><b>System Ant Environment (CMD)</b></legend>
+            <table class="modal-info-table">
+              <tr>
+                <td class="lbl">Status:</td>
+                <td id="modal-ant-status"><span class="badge badge-gray">Checking...</span></td>
+              </tr>
+              <tr>
+                <td class="lbl">Version:</td>
+                <td id="modal-ant-version" class="text-bold">-</td>
+              </tr>
+              <tr>
+                <td class="lbl">where ant:</td>
+                <td id="modal-ant-path" class="text-mono">-</td>
+              </tr>
+              <tr>
+                <td class="lbl">ANT_HOME:</td>
+                <td id="modal-ant-home" class="text-mono">-</td>
+              </tr>
+            </table>
+          </fieldset>
+
+          <fieldset class="win95-box">
+            <legend><b>Select Ant Version &amp; Quick Environment Setup</b></legend>
+            <div class="modal-choice-row">
+              <label for="modal-select-ant">Ant:</label>
+              <select id="modal-select-ant">
+                <option value="">Loading Ant options...</option>
+              </select>
+              <button id="modal-btn-browse-ant" class="win95-btn btn-sm" title="Browse custom Ant directory">
+                Browse...
+              </button>
+              <button id="modal-btn-extract-ant" class="win95-btn btn-sm" style="display: none;">
+                Extract ZIP
+              </button>
+            </div>
+            <div id="modal-ant-choice-desc" class="modal-desc-note text-mono text-muted">
+              Default: System Ant from PATH
+            </div>
+          </fieldset>
+
+          <div class="modal-bottom-bar">
+            <button id="modal-btn-test-ant" class="win95-btn">
+              Test Ant
+            </button>
+            <button id="modal-btn-set-ant-env" class="win95-btn btn-bold" style="margin-left: 6px;" title="Set ANT_HOME and add bin to PATH">
+              Set Environment
+            </button>
+            <div class="flex-spacer"></div>
+            <button id="modal-btn-close-ant" class="win95-btn btn-bold">
+              Close
+            </button>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- Alert / Message Dialog Modal -->
-    <div class="win95-modal-backdrop" id="alert-modal" style="display: none">
-      <div class="window win95-modal-window">
+    <!-- MODAL 2: JAVA (JDK) CONFIGURATION -->
+    <div id="modal-java" class="win95-modal-backdrop" style="display: none;">
+      <div class="window win95-modal-window modal-medium">
+        <div class="title-bar">
+          <div class="title-bar-text">Java Runtime (JDK) Configuration</div>
+          <div class="title-bar-controls">
+            <button aria-label="Close" id="btn-close-modal-java"></button>
+          </div>
+        </div>
+        <div class="window-body modal-content-box">
+          <fieldset class="win95-box">
+            <legend><b>System Java Environment (CMD)</b></legend>
+            <table class="modal-info-table">
+              <tr>
+                <td class="lbl">Status:</td>
+                <td id="modal-java-status"><span class="badge badge-gray">Checking...</span></td>
+              </tr>
+              <tr>
+                <td class="lbl">Java Version:</td>
+                <td id="modal-java-version" class="text-bold">-</td>
+              </tr>
+              <tr>
+                <td class="lbl">Javac Version:</td>
+                <td id="modal-javac-version">-</td>
+              </tr>
+              <tr>
+                <td class="lbl">where java:</td>
+                <td id="modal-java-path" class="text-mono">-</td>
+              </tr>
+              <tr>
+                <td class="lbl">JAVA_HOME:</td>
+                <td id="modal-java-home" class="text-mono">-</td>
+              </tr>
+            </table>
+          </fieldset>
+
+          <fieldset class="win95-box">
+            <legend><b>Select JDK &amp; Quick Environment Setup</b></legend>
+            <div class="modal-choice-row">
+              <label for="modal-select-jdk">JDK:</label>
+              <select id="modal-select-jdk">
+                <option value="">Loading JDKs...</option>
+              </select>
+              <button id="modal-btn-browse-jdk" class="win95-btn btn-sm" title="Browse custom JDK directory">
+                Browse...
+              </button>
+            </div>
+            <div id="modal-jdk-choice-desc" class="modal-desc-note text-mono text-muted">
+              Select a JDK to use for Ant build and environment setup.
+            </div>
+          </fieldset>
+
+          <div class="modal-bottom-bar">
+            <button id="modal-btn-test-java" class="win95-btn">
+              Test Java
+            </button>
+            <button id="modal-btn-set-java-env" class="win95-btn btn-bold" style="margin-left: 6px;" title="Set JAVA_HOME and add bin to PATH">
+              Set Environment
+            </button>
+            <div class="flex-spacer"></div>
+            <button id="modal-btn-close-java" class="win95-btn btn-bold">
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL 3: RETRO WIN95 ALERT -->
+    <div id="alert-modal" class="win95-modal-backdrop" style="display: none;">
+      <div class="window win95-modal-window modal-alert">
         <div class="title-bar">
           <div class="title-bar-text" id="alert-title">Message</div>
           <div class="title-bar-controls">
@@ -400,14 +309,12 @@
           </div>
         </div>
         <div class="window-body modal-body">
-          <div class="about-content">
-            <div class="about-icon" id="alert-icon">ℹ️</div>
-            <div class="about-details" id="alert-message">
-              Notification message goes here.
-            </div>
+          <div class="modal-flex-content">
+            <div id="alert-icon" class="modal-big-icon">[i]</div>
+            <div id="alert-message" class="modal-msg-text">Message content</div>
           </div>
           <div class="modal-actions">
-            <button class="win95-btn" id="btn-ok-alert">OK</button>
+            <button id="btn-ok-alert" class="win95-btn btn-bold" style="min-width: 60px;">OK</button>
           </div>
         </div>
       </div>

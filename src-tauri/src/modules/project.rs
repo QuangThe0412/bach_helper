@@ -187,25 +187,10 @@ pub fn scan_project(path_str: &str) -> ProjectScanResult {
 
     if let Some(xml_path) = xml_file_path {
         if let Ok(content) = fs::read_to_string(xml_path) {
-            // Simple robust regex-less or line-based XML parser for project and targets
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if trimmed.contains("<project") {
-                    if let Some(name) = extract_attribute(trimmed, "name") {
-                        project_name = Some(name);
-                    }
-                    if let Some(def) = extract_attribute(trimmed, "default") {
-                        default_target = Some(def);
-                    }
-                }
-                if trimmed.contains("<target") {
-                    if let Some(target_name) = extract_attribute(trimmed, "name") {
-                        if !ant_targets.contains(&target_name) {
-                            ant_targets.push(target_name);
-                        }
-                    }
-                }
-            }
+            let (p_name, d_tgt, tgts) = parse_build_xml(&content);
+            project_name = p_name;
+            default_target = d_tgt;
+            ant_targets = tgts;
         }
         if let Some(ref p_name) = project_name {
             summary.push(format!("Ant Project Name: {}", p_name));
@@ -237,19 +222,59 @@ pub fn scan_project(path_str: &str) -> ProjectScanResult {
     }
 }
 
-fn extract_attribute(line: &str, attr: &str) -> Option<String> {
-    let pattern = format!("{}=\"", attr);
-    if let Some(start_idx) = line.find(&pattern) {
-        let value_start = start_idx + pattern.len();
-        if let Some(end_idx) = line[value_start..].find('"') {
-            return Some(line[value_start..value_start + end_idx].to_string());
+/// Robust XML tag parser to extract project name, default target, and build targets
+pub fn parse_build_xml(content: &str) -> (Option<String>, Option<String>, Vec<String>) {
+    let mut project_name = None;
+    let mut default_target = None;
+    let mut targets = Vec::new();
+
+    // 1. Find <project ...>
+    if let Some(proj_start) = content.find("<project") {
+        if let Some(proj_end) = content[proj_start..].find('>') {
+            let tag_content = &content[proj_start..proj_start + proj_end];
+            project_name = extract_attr_from_tag(tag_content, "name");
+            default_target = extract_attr_from_tag(tag_content, "default");
         }
     }
-    let pattern_sq = format!("{}='", attr);
-    if let Some(start_idx) = line.find(&pattern_sq) {
-        let value_start = start_idx + pattern_sq.len();
-        if let Some(end_idx) = line[value_start..].find('\'') {
-            return Some(line[value_start..value_start + end_idx].to_string());
+
+    // 2. Find all <target ...>
+    let mut search_from = 0;
+    while let Some(rel_start) = content[search_from..].find("<target") {
+        let tag_start = search_from + rel_start;
+        if let Some(rel_end) = content[tag_start..].find('>') {
+            let tag_end = tag_start + rel_end;
+            let tag_content = &content[tag_start..tag_end];
+
+            // Extract the 'name' attribute which defines the target to build
+            if let Some(target_name) = extract_attr_from_tag(tag_content, "name") {
+                let trimmed_name = target_name.trim().to_string();
+                if !trimmed_name.is_empty() && !targets.contains(&trimmed_name) {
+                    targets.push(trimmed_name);
+                }
+            }
+            search_from = tag_end + 1;
+        } else {
+            break;
+        }
+    }
+
+    // Filter: if there are package targets, exclude internal helper targets like "compile", "init", "clean"
+    let has_packages = targets.iter().any(|t| t.contains("package"));
+    if has_packages {
+        targets.retain(|t| t != "compile" && t != "init" && t != "clean");
+    }
+
+    (project_name, default_target, targets)
+}
+
+fn extract_attr_from_tag(tag: &str, attr: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        let pattern = format!("{}=\\", attr).replace('\\', &quote.to_string());
+        if let Some(start_idx) = tag.find(&pattern) {
+            let val_start = start_idx + pattern.len();
+            if let Some(end_idx) = tag[val_start..].find(quote) {
+                return Some(tag[val_start..val_start + end_idx].to_string());
+            }
         }
     }
     None
