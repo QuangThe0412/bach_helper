@@ -45,13 +45,21 @@ pub struct SystemEnvironmentInfo {
     pub javac_where_path: Option<String>,
 }
 
-/// Decode bytes from Windows CMD (handles UTF-8 and Shift-JIS/CP932 seamlessly)
+/// Decode bytes from Windows CMD (handles UTF-8 BOM, UTF-8, and explicit Shift-JIS/CP932 seamlessly)
 pub fn decode_console_bytes(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }
-    if let Ok(utf8) = std::str::from_utf8(bytes) {
+    let clean_bytes = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        &bytes[3..]
+    } else {
+        bytes
+    };
+    if let Ok(utf8) = std::str::from_utf8(clean_bytes) {
         return utf8.trim_end_matches(&['\r', '\n'][..]).to_string();
+    }
+    if let Some(sjis) = crate::modules::encoding::decode_shift_jis(clean_bytes) {
+        return sjis.trim_end_matches(&['\r', '\n'][..]).to_string();
     }
     #[cfg(windows)]
     {
@@ -68,10 +76,10 @@ pub fn decode_console_bytes(bytes: &[u8]) -> String {
         }
         unsafe {
             let len = MultiByteToWideChar(
-                0, // CP_ACP (System default ANSI codepage, e.g. CP932 on Japanese Windows)
                 0,
-                bytes.as_ptr(),
-                bytes.len() as i32,
+                0,
+                clean_bytes.as_ptr(),
+                clean_bytes.len() as i32,
                 std::ptr::null_mut(),
                 0,
             );
@@ -80,8 +88,8 @@ pub fn decode_console_bytes(bytes: &[u8]) -> String {
                 MultiByteToWideChar(
                     0,
                     0,
-                    bytes.as_ptr(),
-                    bytes.len() as i32,
+                    clean_bytes.as_ptr(),
+                    clean_bytes.len() as i32,
                     wide.as_mut_ptr(),
                     len,
                 );
@@ -91,62 +99,19 @@ pub fn decode_console_bytes(bytes: &[u8]) -> String {
             }
         }
     }
-    String::from_utf8_lossy(bytes)
+    String::from_utf8_lossy(clean_bytes)
         .trim_end_matches(&['\r', '\n'][..])
         .to_string()
 }
 
 pub fn encode_console_bytes(text: &str, as_utf8: bool) -> Vec<u8> {
-    if as_utf8 {
-        return text.as_bytes().to_vec();
-    }
-    #[cfg(windows)]
-    {
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn WideCharToMultiByte(
-                CodePage: u32,
-                dwFlags: u32,
-                lpWideCharStr: *const u16,
-                cchWideChar: i32,
-                lpMultiByteStr: *mut u8,
-                cbMultiByte: i32,
-                lpDefaultChar: *const u8,
-                lpUsedDefaultChar: *mut i32,
-            ) -> i32;
-        }
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        if wide.is_empty() {
-            return Vec::new();
-        }
-        unsafe {
-            let len = WideCharToMultiByte(
-                0,
-                0,
-                wide.as_ptr(),
-                wide.len() as i32,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-            );
-            if len > 0 {
-                let mut buf = vec![0u8; len as usize];
-                WideCharToMultiByte(
-                    0,
-                    0,
-                    wide.as_ptr(),
-                    wide.len() as i32,
-                    buf.as_mut_ptr(),
-                    len,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                );
-                return buf;
-            }
-        }
-    }
-    text.as_bytes().to_vec()
+    let enc = if as_utf8 {
+        crate::modules::encoding::TextEncoding::Utf8
+    } else {
+        crate::modules::encoding::TextEncoding::ShiftJis
+    };
+    crate::modules::encoding::encode_text(text, enc)
+        .unwrap_or_else(|_| text.as_bytes().to_vec())
 }
 
 pub fn execute_exe_version(exe: &str) -> CommandExecutionResult {

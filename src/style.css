@@ -223,6 +223,133 @@ input[type="submit"]:disabled {
     box-sizing: border-box;
   }
 
+  /* Custom Win95 History Dropdown with Delete ('x') per item */
+  .win95-dropdown {
+    position: relative;
+  }
+
+  .win95-dropdown-trigger {
+    width: 100%;
+    height: 22px !important;
+    min-height: 22px !important;
+    min-width: 0 !important;
+    padding: 0 4px 0 6px !important;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+    background-color: #ffffff !important;
+    box-shadow: inset 1px 1px #0a0a0a, inset -1px -1px #ffffff, inset 2px 2px #808080, inset -2px -2px #dfdfdf !important;
+    font-size: 11px;
+    text-align: left;
+    cursor: pointer;
+    box-sizing: border-box;
+  }
+
+  .win95-dropdown-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #000000;
+  }
+
+  .win95-dropdown-arrow {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 16px;
+    flex-shrink: 0;
+    font-size: 9px;
+    background-color: var(--win-gray);
+    color: #000000;
+    box-shadow: inset 1px 1px #ffffff, inset -1px -1px #0a0a0a, inset 2px 2px #dfdfdf, inset -2px -2px #808080;
+  }
+
+  .win95-dropdown-menu {
+    position: absolute;
+    top: 23px;
+    left: 0;
+    min-width: 100%;
+    width: max-content;
+    max-width: 520px;
+    max-height: 240px;
+    overflow-y: auto;
+    background-color: #ffffff;
+    border: 1px solid #000000;
+    box-shadow: 2px 2px 0 #808080;
+    z-index: 4000;
+    box-sizing: border-box;
+  }
+
+  .history-item-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 3px 6px;
+    cursor: pointer;
+    border-bottom: 1px solid #f0f0f0;
+  }
+
+  .history-item-row:last-child {
+    border-bottom: none;
+  }
+
+  .history-item-row:hover {
+    background-color: #000080;
+    color: #ffffff;
+  }
+
+  .history-item-row.active {
+    background-color: #e6ecff;
+    font-weight: bold;
+  }
+
+  .history-item-row.active:hover {
+    background-color: #000080;
+    color: #ffffff;
+  }
+
+  .history-item-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+  }
+
+  .history-item-delete {
+    width: 16px !important;
+    height: 16px !important;
+    min-width: 16px !important;
+    min-height: 16px !important;
+    padding: 0 !important;
+    flex-shrink: 0;
+    font-size: 10px !important;
+    font-weight: bold;
+    line-height: 14px;
+    text-align: center;
+    background-color: var(--win-gray) !important;
+    color: #000000 !important;
+    cursor: pointer;
+  }
+
+  .history-item-delete:hover {
+    background-color: #cc0000 !important;
+    color: #ffffff !important;
+  }
+
+  .history-empty-row {
+    padding: 8px 10px;
+    color: #666666;
+    font-style: italic;
+    font-size: 11px;
+  }
+
   .select-target {
     flex: 0 0 250px;
     height: 23px;
@@ -246,13 +373,22 @@ input[type="submit"]:disabled {
     margin-left: 4px;
   }
 
+  #badge-build-status {
+    cursor: pointer;
+  }
+
+  .toolbar-spacer {
+    flex: 1;
+  }
+
   /* ==========================================================================
-   2. MAIN SPLIT VIEW (CMD & BATCH FILES EXPLORER)
+   2. MAIN WORKSPACE (BATCH FILES FULL AREA + COLLAPSIBLE CMD DRAWER)
    ========================================================================== */
-  .main-split-view {
+  .main-workspace {
     flex: 1;
     min-height: 0;
     display: flex;
+    flex-direction: column;
     gap: 6px;
   }
 
@@ -263,12 +399,18 @@ input[type="submit"]:disabled {
     overflow: hidden;
   }
 
-  .console-col {
-    flex: 1.05;
+  .bat-col {
+    flex: 1;
+    min-height: 120px;
   }
 
-  .bat-col {
-    flex: 1.35;
+  .cmd-drawer {
+    flex: 0 0 220px;
+    min-height: 140px;
+  }
+
+  .cmd-drawer.expanded {
+    flex: 1.4;
   }
 
   .col-legend {
@@ -367,6 +509,150 @@ input[type="submit"]:disabled {
         white-space: nowrap;
       }
 
+      /* Split Batch Files Area (40% Left List / 60% Right Context Preview) */
+      .bat-split-container {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: row;
+        align-items: stretch;
+        overflow: hidden;
+        margin-top: 2px;
+      }
+
+      .bat-list-pane {
+        flex: 0 0 40%;
+        min-width: 180px;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: hidden;
+      }
+
+      .bat-split-resizer {
+        width: 6px;
+        flex-shrink: 0;
+        cursor: col-resize;
+        background-color: var(--win-gray);
+        box-shadow: inset 1px 0 #ffffff, inset -1px 0 #808080;
+        margin: 0 3px;
+      }
+
+      .bat-split-resizer:hover,
+      .bat-split-resizer.dragging {
+        background-color: #9e9e9e;
+      }
+
+      .bat-preview-pane {
+        flex: 1 1 0;
+        min-width: 180px;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: hidden;
+        border: 1px solid #808080;
+        background-color: #dcdcdc;
+        padding: 3px;
+        box-sizing: border-box;
+      }
+
+      .bat-preview-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        margin-bottom: 3px;
+        padding: 2px 4px;
+        background-color: var(--win-gray);
+        box-shadow: inset 1px 1px #ffffff, inset -1px -1px #808080;
+        flex-shrink: 0;
+      }
+
+      .bat-preview-title {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 11px;
+        font-weight: bold;
+        color: #000080;
+      }
+
+      .bat-preview-actions {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        flex-shrink: 0;
+      }
+
+      .bat-preview-body {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        overflow: hidden;
+        background-color: #ffffff;
+        box-shadow: inset 1px 1px #0a0a0a, inset -1px -1px #ffffff, inset 2px 2px #808080, inset -2px -2px #dfdfdf;
+      }
+
+      .bat-code-viewer {
+        flex: 1;
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 6px 8px;
+        box-sizing: border-box;
+        overflow: auto;
+        background-color: #ffffff;
+        color: #1e1e1e;
+        font-family: "Consolas", "Courier New", monospace !important;
+        font-size: 11.5px;
+        line-height: 1.48;
+        white-space: pre;
+        user-select: text;
+      }
+
+      .bat-code-viewer * {
+        font-family: "Consolas", "Courier New", monospace !important;
+      }
+
+      /* Light theme BAT syntax tokens */
+      .bat-tok-comment { color: #008000; font-style: italic; }
+      .bat-tok-cmd { color: #0000cc; font-weight: bold; }
+      .bat-tok-kw { color: #800090; font-weight: bold; }
+      .bat-tok-var { color: #b45309; font-weight: bold; }
+      .bat-tok-var-arg { color: #0f766e; font-weight: bold; }
+      .bat-tok-filter { color: #a6005e; font-weight: bold; }
+      .bat-tok-path { color: #0451a5; }
+      .bat-tok-param { color: #5c4033; }
+      .bat-tok-string { color: #a31515; }
+      .bat-tok-label { color: #6f2da8; font-weight: bold; }
+      .bat-tok-op { color: #444444; font-weight: bold; }
+
+      /* Dark theme BAT syntax viewer */
+      .bat-code-viewer.theme-dark {
+        background-color: #1e1e1e;
+        color: #d4d4d4;
+      }
+
+      .bat-code-viewer.theme-dark .bat-tok-comment { color: #6a9955; font-style: italic; }
+      .bat-code-viewer.theme-dark .bat-tok-cmd { color: #569cd6; font-weight: bold; }
+      .bat-code-viewer.theme-dark .bat-tok-kw { color: #c586c0; font-weight: bold; }
+      .bat-code-viewer.theme-dark .bat-tok-var { color: #ce9178; font-weight: bold; }
+      .bat-code-viewer.theme-dark .bat-tok-var-arg { color: #4ec9b0; font-weight: bold; }
+      .bat-code-viewer.theme-dark .bat-tok-filter { color: #d7ba7d; font-weight: bold; }
+      .bat-code-viewer.theme-dark .bat-tok-path { color: #9cdcfe; }
+      .bat-code-viewer.theme-dark .bat-tok-param { color: #dcdcaa; }
+      .bat-code-viewer.theme-dark .bat-tok-string { color: #f48771; }
+      .bat-code-viewer.theme-dark .bat-tok-label { color: #c586c0; font-weight: bold; }
+      .bat-code-viewer.theme-dark .bat-tok-op { color: #b4b4b4; font-weight: bold; }
+
+      .group-run-log {
+        height: 150px;
+        border: 1px solid #808080;
+        box-shadow: inset 1px 1px #0a0a0a, inset -1px -1px #ffffff;
+      }
+
       /* Explorer Table */
       .explorer-table-container {
         flex: 1;
@@ -378,6 +664,7 @@ input[type="submit"]:disabled {
 
       .bat-table {
         width: 100%;
+        table-layout: fixed;
         border-collapse: collapse;
         font-size: 11px;
       }
@@ -386,7 +673,7 @@ input[type="submit"]:disabled {
         position: sticky;
         top: 0;
         background: var(--win-gray);
-        padding: 3px 6px;
+        padding: 3px 5px;
         border-right: 1px solid #808080;
         border-bottom: 1px solid #808080;
         text-align: left;
@@ -397,31 +684,44 @@ input[type="submit"]:disabled {
       }
 
       .bat-table td {
-        padding: 3px 6px;
+        padding: 3px 5px;
         border-bottom: 1px solid #e0e0e0;
         white-space: nowrap;
         font-size: 11px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .bat-table tbody tr {
+        cursor: pointer;
       }
 
       .bat-table tbody tr:hover {
+        background-color: #d8e4f8;
+        color: #000000;
+      }
+
+      .bat-table tbody tr.selected-row,
+      .bat-table tbody tr.selected-row:hover {
         background-color: #000080;
         color: #ffffff;
       }
 
-      .bat-table tbody tr:hover td {
-        color: #ffffff;
+      .bat-table tbody tr.selected-row td {
+        color: #ffffff !important;
       }
 
-      .bat-table tbody tr:hover .btn-bat-run {
+      .bat-table tbody tr:hover .btn-bat-run,
+      .bat-table tbody tr.selected-row .btn-bat-run {
         color: #000000 !important;
       }
 
       .file-name-cell {
-        display: flex;
-        align-items: center;
-        gap: 5px;
+        display: block;
+        width: 100%;
         overflow: hidden;
         text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .file-icon {
@@ -441,6 +741,7 @@ input[type="submit"]:disabled {
         color: #666666;
         padding: 24px 8px !important;
         font-style: italic;
+        white-space: normal !important;
       }
 
       /* ==========================================================================
@@ -488,11 +789,15 @@ input[type="submit"]:disabled {
       }
 
       #footer-ant-btn {
-        flex: 0 0 220px;
+        flex: 0 0 200px;
       }
 
       #footer-java-btn {
-        flex: 0 0 240px;
+        flex: 0 0 215px;
+      }
+
+      #footer-config-btn {
+        flex: 0 0 155px;
       }
 
       .footer-settings {
@@ -582,12 +887,217 @@ input[type="submit"]:disabled {
 
       .win95-modal-window {
         box-shadow: 2px 2px 0 #000000;
+        max-height: 90vh;
+        display: flex;
+        flex-direction: column;
       }
 
       .modal-medium {
         width: 540px;
         max-width: 95vw;
         box-sizing: border-box;
+      }
+
+      .modal-small {
+        width: 440px;
+        max-width: 95vw;
+        box-sizing: border-box;
+      }
+
+      .modal-large {
+        width: 680px;
+        max-width: 94vw;
+        box-sizing: border-box;
+      }
+
+      #alert-modal {
+        z-index: 10050 !important;
+      }
+
+      .modal-scroll-area {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding-right: 2px;
+      }
+
+      .path-scroll-box {
+        width: 100%;
+        max-width: 100%;
+        overflow-x: auto;
+        overflow-y: hidden;
+        white-space: nowrap;
+        padding: 2px 5px;
+        background-color: #ffffff;
+        border: 1px solid #b8b8b8;
+        box-sizing: border-box;
+        user-select: text;
+      }
+
+      .autoconfig-table {
+        width: 100%;
+        table-layout: fixed;
+        border-collapse: collapse;
+        font-size: 11px;
+      }
+
+      .autoconfig-table td {
+        padding: 5px 4px;
+        border-bottom: 1px solid #d4d4d4;
+        vertical-align: middle;
+      }
+
+      .autoconfig-table tr:last-child td {
+        border-bottom: none;
+      }
+
+      .autoconfig-item {
+        width: 138px;
+        white-space: nowrap;
+      }
+
+      .autoconfig-status {
+        width: 72px;
+        text-align: center;
+      }
+
+      .autoconfig-detail-cell {
+        width: auto;
+        min-width: 0;
+        overflow: hidden;
+      }
+
+      .autoconfig-action {
+        width: 70px;
+        text-align: right;
+      }
+
+      .autoconfig-target-table {
+        table-layout: fixed;
+      }
+
+      .autoconfig-target-table td:last-child {
+        width: auto;
+        min-width: 0;
+        overflow: hidden;
+      }
+
+      .autoconfig-summary {
+        margin-top: 6px;
+        padding: 6px 8px;
+        background-color: #ffffff;
+        border: 1px solid #808080;
+        font-size: 11px;
+        line-height: 1.4;
+        max-height: 110px;
+        overflow: auto;
+        word-break: break-word;
+      }
+
+      .setting-num-input {
+        width: 100px;
+        height: 22px;
+        padding: 2px 6px;
+        box-sizing: border-box;
+      }
+
+      .setting-toggle-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 8px;
+        padding: 5px 8px;
+        background-color: #dfdfdf;
+        border: 1px solid #808080;
+        box-shadow: inset 1px 1px #ffffff, inset -1px -1px #808080;
+        cursor: pointer;
+        font-size: 11px;
+      }
+
+      .setting-toggle-text {
+        flex: 1;
+        font-weight: bold;
+      }
+
+      .group-run-table-wrap {
+        max-height: 200px;
+        overflow-y: auto;
+        border: 1px solid #808080;
+        background-color: #ffffff;
+      }
+
+      .group-run-table {
+        width: 100%;
+        table-layout: fixed;
+        border-collapse: collapse;
+        font-size: 11px;
+      }
+
+      .group-run-table th {
+        position: sticky;
+        top: 0;
+        background: var(--win-gray);
+        padding: 3px 6px;
+        border-right: 1px solid #808080;
+        border-bottom: 1px solid #808080;
+        font-weight: bold;
+        z-index: 2;
+      }
+
+      .group-run-table td {
+        padding: 4px 6px;
+        border-bottom: 1px solid #e0e0e0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .group-run-table tbody tr {
+        cursor: pointer;
+      }
+
+      .group-run-table tbody tr.selected-row {
+        background-color: #000080;
+        color: #ffffff;
+      }
+
+      /* Win95 Right-Click Context Menu */
+      .win95-context-menu {
+        position: fixed;
+        z-index: 9500;
+        min-width: 175px;
+        padding: 2px;
+        background-color: var(--win-gray);
+        box-shadow: inset 1px 1px #ffffff, inset -1px -1px #0a0a0a, inset 2px 2px #dfdfdf, inset -2px -2px #808080, 2px 2px 0 rgba(0, 0, 0, 0.35);
+      }
+
+      .win95-context-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 4px 10px;
+        font-size: 11px;
+        color: #000000;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+
+      .win95-context-item:hover:not(.disabled) {
+        background-color: #000080;
+        color: #ffffff;
+      }
+
+      .win95-context-item.disabled {
+        color: #777777;
+        cursor: default;
+      }
+
+      .win95-context-sep {
+        height: 1px;
+        margin: 2px 3px;
+        background-color: #808080;
+        border-bottom: 1px solid #ffffff;
       }
 
       .modal-alert {
@@ -602,6 +1112,9 @@ input[type="submit"]:disabled {
         padding: 8px 10px 10px 10px;
         box-sizing: border-box;
         max-width: 100%;
+        min-height: 0;
+        flex: 1;
+        overflow-y: auto;
         overflow-x: hidden;
       }
 
@@ -687,4 +1200,125 @@ input[type="submit"]:disabled {
         display: flex;
         justify-content: flex-end;
         margin-top: 8px;
+      }
+
+      /* ==========================================================================
+         6. SIMULATED CMD WINDOW SIZE CALIBRATION MODE (cmd-size-picker)
+         ========================================================================== */
+      body.cmd-picker-body {
+        margin: 0;
+        padding: 0;
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+        background-color: #0c0c0c;
+        color: #cccccc;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .cmd-picker-shell {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        height: 100%;
+        background-color: #0c0c0c;
+        border: 2px solid #444444;
+        box-sizing: border-box;
+      }
+
+      .cmd-picker-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 5px 10px;
+        background-color: #1f1f1f;
+        border-bottom: 1px solid #3a3a3a;
+        cursor: move;
+        flex-shrink: 0;
+      }
+
+      .cmd-picker-header-title {
+        font-family: "Consolas", "Courier New", monospace !important;
+        font-size: 12px;
+        font-weight: bold;
+        color: #f0f0f0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .cmd-picker-dim-badge {
+        font-family: "Consolas", "Courier New", monospace !important;
+        font-size: 12px;
+        font-weight: bold;
+        padding: 2px 8px;
+        background-color: #000080;
+        color: #ffffff;
+        border: 1px solid #ffffff;
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+
+      .cmd-picker-terminal {
+        flex: 1;
+        min-height: 0;
+        padding: 10px 12px;
+        overflow: auto;
+        background-color: #0c0c0c;
+        color: #e0e0e0;
+        font-family: "Consolas", "Courier New", monospace !important;
+        font-size: 13px;
+        line-height: 1.45;
+        white-space: pre;
+        cursor: move;
+        user-select: none;
+        box-sizing: border-box;
+      }
+
+      .cmd-picker-terminal * {
+        font-family: "Consolas", "Courier New", monospace !important;
+      }
+
+      .cmd-picker-prompt {
+        color: #00ff66;
+        font-weight: bold;
+      }
+
+      .cmd-picker-ruler {
+        color: #777777;
+      }
+
+      .cmd-picker-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 6px 10px;
+        background-color: #c0c0c0;
+        border-top: 2px solid #ffffff;
+        box-shadow: inset 0 1px #808080;
+        flex-shrink: 0;
+      }
+
+      .cmd-picker-footer-info {
+        font-size: 11px;
+        color: #000000;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .cmd-picker-footer-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+
+      .cmd-picker-done-btn {
+        min-width: 78px !important;
+        color: #000080 !important;
+        font-weight: bold !important;
       }

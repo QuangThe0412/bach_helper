@@ -35,10 +35,14 @@
             Browse...
           </button>
 
-          <label for="select-project-history" class="row-label row-label-short">History:</label>
-          <select id="select-project-history" class="select-history">
-            <option value="">(No history)</option>
-          </select>
+          <label class="row-label row-label-short">History:</label>
+          <div id="history-dropdown" class="win95-dropdown select-history">
+            <button id="btn-history-dropdown" type="button" class="win95-dropdown-trigger" title="Select or remove recent projects">
+              <span id="history-dropdown-label" class="win95-dropdown-label">(No history)</span>
+              <span class="win95-dropdown-arrow">&#9662;</span>
+            </button>
+            <div id="history-dropdown-menu" class="win95-dropdown-menu" style="display: none;"></div>
+          </div>
         </div>
 
         <!-- Row 2: Target Selection & Build Button -->
@@ -48,40 +52,45 @@
             <option value="">-- Select a project to load targets --</option>
           </select>
 
+          <button id="btn-show-config" class="win95-btn" title="Open selected target .properties file in default OS application" disabled>
+            Show Config
+          </button>
+
           <button id="btn-run-build" class="win95-btn btn-build btn-bold" disabled>
             Build
           </button>
 
           <div class="build-status-wrapper">
-            <span id="badge-build-status" class="badge badge-gray">READY</span>
+            <span id="badge-build-status" class="badge badge-gray" title="Click to toggle CMD build log">READY</span>
           </div>
+
+          <div class="toolbar-spacer"></div>
+
+          <button id="btn-auto-config" class="win95-btn btn-bold" title="Check Ant, Java, Window Size and configure build.xml &amp; .properties">
+            Auto Config
+          </button>
+          <button id="btn-toggle-cmd" class="win95-btn">
+            Show CMD
+          </button>
+          <button id="btn-open-build-dir" class="win95-btn" title="Open build.xml folder in Explorer" disabled>
+            Open Build Folder
+          </button>
         </div>
       </fieldset>
 
-      <!-- 2. MAIN SPLIT VIEW: CMD & BATCH FILES EXPLORER -->
-      <div class="main-split-view">
+      <!-- 2. MAIN WORKSPACE: SPLIT BATCH EXPLORER (40/60) + COLLAPSIBLE CMD DRAWER -->
+      <div class="main-workspace">
 
-        <!-- LEFT COLUMN: CMD REALTIME CONSOLE -->
-        <fieldset class="win95-box split-col console-col">
-          <legend class="col-legend">
-            <span>CMD</span>
-            <button id="btn-open-build-dir" class="win95-btn btn-xs" title="Open build.xml folder in Explorer">
-              Open Build Folder
-            </button>
-          </legend>
-
-          <div class="console-wrapper">
-            <div id="build-console-output" class="retro-terminal"></div>
-          </div>
-        </fieldset>
-
-        <!-- RIGHT COLUMN: BATCH FILES EXPLORER -->
+        <!-- TOP: BATCH FILES EXPLORER (LEFT LIST 40% + RIGHT PREVIEW 60%) -->
         <fieldset class="win95-box split-col bat-col">
           <legend class="col-legend">
-            <span>Batch Files (batch/batfiles)</span>
+            <span>Batch Files (target/batch/batfiles)</span>
             <div class="legend-actions">
-              <button id="btn-open-log" class="win95-btn btn-xs" title="Open batchApp.log">
-                Open File Log
+              <button id="btn-open-log" class="win95-btn btn-xs" title="Configured batch log file" disabled>
+                File Log (N/A)
+              </button>
+              <button id="btn-open-app-log" class="win95-btn btn-xs" title="Configured application log file" disabled>
+                App Log (N/A)
               </button>
               <button id="btn-open-bat-dir" class="win95-btn btn-xs" title="Open batch folder in Windows Explorer" disabled>
                 Open Folder
@@ -103,37 +112,84 @@
             </button>
           </div>
 
-          <!-- Search / Filter Bar -->
-          <div class="bat-control-bar">
-            <label for="input-bat-filter" class="bar-label">Filter:</label>
-            <input
-              id="input-bat-filter"
-              type="text"
-              class="bar-input"
-              placeholder="Search / filter .bat files by name..."
-            />
-            <span id="meta-bat-count" class="badge badge-blue">0 files</span>
-          </div>
+          <!-- Split Pane: 40% List / 60% Context Preview -->
+          <div id="bat-split-container" class="bat-split-container">
+            <div id="bat-list-pane" class="bat-list-pane">
+              <!-- Search / Filter Bar -->
+              <div class="bat-control-bar">
+                <label for="input-bat-filter" class="bar-label">Filter:</label>
+                <input
+                  id="input-bat-filter"
+                  type="text"
+                  class="bar-input"
+                  placeholder="Search / filter .bat files by name..."
+                />
+                <span id="meta-bat-selected" class="badge badge-blue" style="display: none;">0 sel</span>
+                <span id="meta-bat-count" class="badge badge-blue">0 files</span>
+              </div>
 
-          <!-- Explorer Table (No Size Column) -->
-          <div class="explorer-table-container">
-            <table class="win95-table bat-table">
-              <thead>
-                <tr>
-                  <th style="width: 28px; text-align: center;">#</th>
-                  <th>File Name (.bat)</th>
-                  <th style="width: 135px; text-align: center;">Modified Date</th>
-                  <th style="width: 65px; text-align: center;">Action</th>
-                </tr>
-              </thead>
-              <tbody id="tbody-bat-files">
-                <tr>
-                  <td colspan="4" class="empty-row">
-                    No .bat files loaded. Select a project/target or browse a folder.
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+              <!-- Explorer Table (No Size Column, Supports Shift/Ctrl Multi-Select) -->
+              <div class="explorer-table-container">
+                <table class="win95-table bat-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 28px; text-align: center;">#</th>
+                      <th>File Name (.bat)</th>
+                      <th style="width: 122px; text-align: center;">Modified</th>
+                      <th style="width: 54px; text-align: center;">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tbody-bat-files">
+                    <tr>
+                      <td colspan="4" class="empty-row">
+                        No .bat files found in target folder. Run Build or browse a custom folder.
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div id="bat-split-resizer" class="bat-split-resizer" title="Drag left/right to resize panes"></div>
+
+            <div id="bat-preview-pane" class="bat-preview-pane">
+              <div class="bat-preview-header">
+                <span id="bat-preview-title" class="bat-preview-title">Select a .bat file to view content</span>
+                <div class="bat-preview-actions">
+                  <button id="btn-toggle-bat-theme" class="win95-btn btn-xs" title="Toggle light/dark syntax theme">
+                    Dark
+                  </button>
+                  <button id="btn-open-selected-bat" class="win95-btn btn-xs" title="Open selected .bat file in OS default text editor (.txt)" disabled>
+                    Open File
+                  </button>
+                  <button id="btn-run-selected-bat" class="win95-btn btn-xs btn-bold" disabled>
+                    Run
+                  </button>
+                </div>
+              </div>
+              <div class="bat-preview-body">
+                <pre id="bat-preview-content" class="bat-code-viewer">Select a .bat file from the left list to inspect its script content.</pre>
+              </div>
+            </div>
+          </div>
+        </fieldset>
+
+        <!-- BOTTOM: COLLAPSIBLE CMD REALTIME CONSOLE DRAWER -->
+        <fieldset id="cmd-panel-box" class="win95-box split-col console-col cmd-drawer" style="display: none;">
+          <legend class="col-legend">
+            <span>CMD</span>
+            <div class="legend-actions">
+              <button id="btn-expand-cmd" class="win95-btn btn-xs" title="Expand or restore CMD height">
+                Expand
+              </button>
+              <button id="btn-hide-cmd" class="win95-btn btn-xs" title="Hide CMD panel">
+                Hide
+              </button>
+            </div>
+          </legend>
+
+          <div class="console-wrapper">
+            <div id="build-console-output" class="retro-terminal"></div>
           </div>
         </fieldset>
 
@@ -150,6 +206,12 @@
         <div id="footer-java-btn" class="status-bar-field footer-clickable" title="Click to configure &amp; inspect Java / JDK">
           <span class="footer-label"><b>Java:</b></span>
           <span id="footer-java-val" class="footer-val">Checking...</span>
+          <span class="footer-arrow">&#9662;</span>
+        </div>
+
+        <div id="footer-config-btn" class="status-bar-field footer-clickable" title="Click to configure PowerShell window &amp; screenshot settings (setting.json)">
+          <span class="footer-label"><b>Settings:</b></span>
+          <span id="footer-config-val" class="footer-val">1000x650</span>
           <span class="footer-arrow">&#9662;</span>
         </div>
 
@@ -298,6 +360,199 @@
         </div>
       </div>
     </div>
+
+    <!-- MODAL 4: BAT RUN SETTINGS (setting.json) -->
+    <div id="modal-settings" class="win95-modal-backdrop" style="display: none;">
+      <div class="window win95-modal-window modal-small">
+        <div class="title-bar">
+          <div class="title-bar-text">BAT Run Settings</div>
+          <div class="title-bar-controls">
+            <button aria-label="Close" id="btn-close-modal-settings"></button>
+          </div>
+        </div>
+        <div class="window-body modal-content-box">
+          <fieldset class="win95-box">
+            <legend><b>PowerShell Batch Window</b></legend>
+            <table class="modal-info-table">
+              <tr>
+                <td class="lbl">Window Width (px):</td>
+                <td>
+                  <input id="setting-ps-width" type="number" min="320" max="3840" step="10" class="setting-num-input" />
+                </td>
+              </tr>
+              <tr>
+                <td class="lbl">Window Height (px):</td>
+                <td>
+                  <input id="setting-ps-height" type="number" min="240" max="2160" step="10" class="setting-num-input" />
+                </td>
+              </tr>
+            </table>
+            <label class="setting-toggle-row" for="setting-auto-capture">
+              <input id="setting-auto-capture" type="checkbox" />
+              <span class="setting-toggle-text">Auto Screenshot Capture (Clipboard)</span>
+              <span id="setting-auto-capture-state" class="badge badge-green">ON</span>
+            </label>
+            <div id="modal-setting-file-desc" class="modal-desc-note text-mono text-muted path-scroll-box">
+              Config: setting.json
+            </div>
+          </fieldset>
+
+          <div class="modal-bottom-bar">
+            <button id="modal-btn-reset-settings" class="win95-btn">
+              Reset Default
+            </button>
+            <button id="modal-btn-pick-size" class="win95-btn" style="margin-left: 6px;" title="Open resizable simulated CMD window to calibrate width and height">
+              Size
+            </button>
+            <div class="flex-spacer"></div>
+            <button id="modal-btn-save-settings" class="win95-btn btn-bold" style="margin-right: 6px;">
+              Save
+            </button>
+            <button id="modal-btn-close-settings" class="win95-btn">
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL 5: AUTO CONFIG CHECKLIST & APPLY -->
+    <div id="modal-auto-config" class="win95-modal-backdrop" style="display: none;">
+      <div class="window win95-modal-window modal-medium" style="width: 640px;">
+        <div class="title-bar">
+          <div class="title-bar-text">Auto Config - Environment &amp; Project Check</div>
+          <div class="title-bar-controls">
+            <button aria-label="Close" id="btn-close-modal-autoconfig"></button>
+          </div>
+        </div>
+        <div class="window-body modal-content-box">
+          <div class="modal-scroll-area">
+            <fieldset class="win95-box">
+              <legend><b>1. Prerequisite Environment Checks</b></legend>
+              <table class="autoconfig-table">
+                <tbody>
+                  <tr>
+                    <td class="autoconfig-item"><b>1. Apache Ant</b></td>
+                    <td class="autoconfig-status"><span id="autoconfig-check-ant-badge" class="badge badge-gray">CHECKING</span></td>
+                    <td class="autoconfig-detail-cell">
+                      <div id="autoconfig-check-ant-detail" class="path-scroll-box text-mono">-</div>
+                    </td>
+                    <td class="autoconfig-action">
+                      <button id="autoconfig-btn-fix-ant" class="win95-btn btn-xs">Config</button>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td class="autoconfig-item"><b>2. Java (JDK)</b></td>
+                    <td class="autoconfig-status"><span id="autoconfig-check-java-badge" class="badge badge-gray">CHECKING</span></td>
+                    <td class="autoconfig-detail-cell">
+                      <div id="autoconfig-check-java-detail" class="path-scroll-box text-mono">-</div>
+                    </td>
+                    <td class="autoconfig-action">
+                      <button id="autoconfig-btn-fix-java" class="win95-btn btn-xs">Config</button>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td class="autoconfig-item"><b>3. Run .bat Window Size</b></td>
+                    <td class="autoconfig-status"><span id="autoconfig-check-window-badge" class="badge badge-gray">CHECKING</span></td>
+                    <td class="autoconfig-detail-cell">
+                      <div id="autoconfig-check-window-detail" class="path-scroll-box text-mono">-</div>
+                    </td>
+                    <td class="autoconfig-action">
+                      <button id="autoconfig-btn-fix-window" class="win95-btn btn-xs">Setting</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </fieldset>
+
+            <fieldset class="win95-box" style="margin-top: 8px !important;">
+              <legend><b>2. Target Configuration Files</b></legend>
+              <table class="modal-info-table autoconfig-target-table">
+                <tr>
+                  <td class="lbl">Project:</td>
+                  <td><div id="autoconfig-project-path" class="path-scroll-box text-mono">-</div></td>
+                </tr>
+                <tr>
+                  <td class="lbl">Target Package:</td>
+                  <td id="autoconfig-target-name" class="text-bold">-</td>
+                </tr>
+                <tr>
+                  <td class="lbl">Resolved Java Home:</td>
+                  <td><div id="autoconfig-java-home" class="path-scroll-box text-mono">-</div></td>
+                </tr>
+                <tr>
+                  <td class="lbl">Properties File:</td>
+                  <td><div id="autoconfig-prop-file" class="path-scroll-box text-mono">-</div></td>
+                </tr>
+              </table>
+              <div id="autoconfig-summary-note" class="autoconfig-summary">
+                Checking system environment and configuration files...
+              </div>
+            </fieldset>
+          </div>
+
+          <div class="modal-bottom-bar">
+            <button id="modal-btn-recheck-autoconfig" class="win95-btn">
+              Re-check
+            </button>
+            <div class="flex-spacer"></div>
+            <button id="modal-btn-apply-autoconfig" class="win95-btn btn-bold" style="margin-right: 6px;">
+              Apply Auto Config
+            </button>
+            <button id="modal-btn-close-autoconfig" class="win95-btn">
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL 6: GROUP BAT EXECUTION RESULTS -->
+    <div id="modal-group-run" class="win95-modal-backdrop" style="display: none;">
+      <div class="window win95-modal-window modal-large">
+        <div class="title-bar">
+          <div class="title-bar-text">Run Group - Sequential BAT Execution</div>
+          <div class="title-bar-controls">
+            <button aria-label="Close" id="btn-close-modal-group-run"></button>
+          </div>
+        </div>
+        <div class="window-body modal-content-box">
+          <div id="group-run-summary" class="autoconfig-summary">
+            Preparing group execution...
+          </div>
+
+          <div class="group-run-table-wrap">
+            <table class="win95-table group-run-table">
+              <thead>
+                <tr>
+                  <th style="width: 30px; text-align: center;">#</th>
+                  <th>Batch File</th>
+                  <th style="width: 82px; text-align: center;">Status</th>
+                  <th style="width: 72px; text-align: center;">Exit</th>
+                  <th style="width: 78px; text-align: right;">Time</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-group-run-results"></tbody>
+            </table>
+          </div>
+
+          <fieldset class="win95-box">
+            <legend><b id="group-run-output-title">Execution Output</b></legend>
+            <pre id="group-run-output-log" class="bat-code-viewer group-run-log">Select a row above to inspect its stdout/stderr.</pre>
+          </fieldset>
+
+          <div class="modal-bottom-bar">
+            <div class="flex-spacer"></div>
+            <button id="modal-btn-close-group-run" class="win95-btn btn-bold">
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- WIN95 CONTEXT MENU FOR BAT LIST -->
+    <div id="bat-context-menu" class="win95-context-menu" style="display: none;"></div>
 
     <!-- MODAL 3: RETRO WIN95 ALERT -->
     <div id="alert-modal" class="win95-modal-backdrop" style="display: none;">

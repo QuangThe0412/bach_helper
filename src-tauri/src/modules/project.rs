@@ -186,7 +186,8 @@ pub fn scan_project(path_str: &str) -> ProjectScanResult {
     let mut ant_targets = Vec::new();
 
     if let Some(xml_path) = xml_file_path {
-        if let Ok(content) = fs::read_to_string(xml_path) {
+        if let Ok(bytes) = fs::read(&xml_path) {
+            let (content, _) = crate::modules::encoding::detect_and_decode_text(&bytes);
             let (p_name, d_tgt, tgts) = parse_build_xml(&content);
             project_name = p_name;
             default_target = d_tgt;

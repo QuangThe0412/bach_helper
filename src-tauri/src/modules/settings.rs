@@ -119,6 +119,29 @@ pub fn add_project_to_history(project_path: &str) -> Result<AppSettings, String>
     Ok(settings)
 }
 
+pub fn remove_project_from_history(project_path: &str) -> Result<AppSettings, String> {
+    let clean_path = project_path.trim().trim_matches('"');
+    let mut settings = load_settings();
+
+    if clean_path.is_empty() {
+        return Ok(settings);
+    }
+
+    let clean_lower = clean_path.to_lowercase();
+    settings
+        .history
+        .retain(|p| p.trim().to_lowercase() != clean_lower);
+
+    if let Some(ref lp) = settings.last_project {
+        if lp.trim().to_lowercase() == clean_lower {
+            settings.last_project = settings.history.first().cloned();
+        }
+    }
+
+    save_settings(&settings)?;
+    Ok(settings)
+}
+
 pub fn save_open_tabs_state(
     open_tabs: Vec<String>,
     active_tab_index: usize,
