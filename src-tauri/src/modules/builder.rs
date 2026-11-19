@@ -8,7 +8,10 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter};
+
+static PS_SCRIPT_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -81,6 +84,35 @@ pub struct BatGroupStepResult {
     pub stdout: String,
     pub stderr: String,
     pub error_message: Option<String>,
+    pub screenshot_path: Option<String>,
+    pub screenshot_saved: bool,
+    pub screenshot_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatLaunchResult {
+    pub launched: bool,
+    pub screenshot_path: Option<String>,
+    pub screenshot_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatExecutionFinishedEvent {
+    pub tab_id: String,
+    pub path: String,
+    pub bat_name: String,
+    pub success: bool,
+    pub exit_code: Option<i32>,
+    pub screenshot_saved: bool,
+    pub screenshot_path: Option<String>,
+    pub screenshot_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClearLogsResult {
+    pub cleared_files: Vec<String>,
+    pub failed_files: Vec<String>,
+    pub log_dirs_checked: Vec<String>,
 }
 
 /// Find any OneDrive Desktop directories under USERPROFILE
@@ -162,8 +194,14 @@ pub fn find_properties_for_target(build_dir: &Path, target: &str) -> Option<Path
         build_dir.join("filters"),
         build_dir.join("filter"),
         build_dir.to_path_buf(),
-        build_dir.parent().map(|p| p.join("build/filters")).unwrap_or_default(),
-        build_dir.parent().map(|p| p.join("filters")).unwrap_or_default(),
+        build_dir
+            .parent()
+            .map(|p| p.join("build/filters"))
+            .unwrap_or_default(),
+        build_dir
+            .parent()
+            .map(|p| p.join("filters"))
+            .unwrap_or_default(),
     ];
 
     for folder in check_folders {
@@ -240,10 +278,18 @@ pub fn validate_java_home_dir(raw_path: &str) -> Result<PathBuf, String> {
     let javac_bin = root.join("bin").join(javac_name);
 
     if !java_bin.is_file() {
-        return Err(format!("Missing bin/{} in JDK directory: {}", java_name, root.display()));
+        return Err(format!(
+            "Missing bin/{} in JDK directory: {}",
+            java_name,
+            root.display()
+        ));
     }
     if !javac_bin.is_file() {
-        return Err(format!("Missing bin/{} compiler in JDK directory: {}", javac_name, root.display()));
+        return Err(format!(
+            "Missing bin/{} compiler in JDK directory: {}",
+            javac_name,
+            root.display()
+        ));
     }
 
     Ok(root)
@@ -399,9 +445,7 @@ pub fn to_batch_safe_path(path: &str) -> String {
                 Component::Normal(seg) => {
                     real_prefix.push(seg);
                     let seg_str = seg.to_string_lossy();
-                    if seg_str.is_ascii()
-                        && !seg_str.bytes().any(|b| b.is_ascii_whitespace())
-                    {
+                    if seg_str.is_ascii() && !seg_str.bytes().any(|b| b.is_ascii_whitespace()) {
                         safe_path.push(seg);
                     } else {
                         let short_probe = if safe_path.as_os_str().is_empty() {
@@ -494,7 +538,7 @@ pub fn to_display_long_path(path: &Path) -> PathBuf {
 }
 
 /// Expand an existing or non-existent path by resolving its deepest existing ancestor to a long path.
-fn resolve_long_path_best_effort(path: &Path) -> PathBuf {
+pub fn resolve_long_path_best_effort(path: &Path) -> PathBuf {
     if path.exists() {
         return to_display_long_path(path);
     }
@@ -561,8 +605,8 @@ pub fn fix_build_xml_java_path(build_dir: &Path, active_java_home: &str) -> Opti
         if let Some(cur_exe) = extract_xml_attribute(line, "executable") {
             if cur_exe.to_lowercase().contains("javac") {
                 let cur_path = Path::new(&cur_exe);
-                let cur_exists = cur_path.is_file()
-                    || Path::new(&format!("{}.exe", cur_exe)).is_file();
+                let cur_exists =
+                    cur_path.is_file() || Path::new(&format!("{}.exe", cur_exe)).is_file();
 
                 if !cur_exists || !cur_exe.eq_ignore_ascii_case(&desired_javac) {
                     let old_attr = format!("executable=\"{}\"", cur_exe);
@@ -576,7 +620,11 @@ pub fn fix_build_xml_java_path(build_dir: &Path, active_java_home: &str) -> Opti
     }
 
     if changed_to.is_some() {
-        let line_ending = if content.contains("\r\n") { "\r\n" } else { "\n" };
+        let line_ending = if content.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
         let mut final_text = updated_lines.join(line_ending);
         if content.ends_with('\n') {
             final_text.push_str(line_ending);
@@ -714,7 +762,8 @@ pub fn fix_properties_file_paths(
                 } else if let Some(ref old_p) = old_proj_prefix {
                     if !old_p.is_empty() {
                         let old_lower = old_p.to_lowercase();
-                        if val_lower.starts_with(&old_lower) && val_norm.is_char_boundary(old_p.len())
+                        if val_lower.starts_with(&old_lower)
+                            && val_norm.is_char_boundary(old_p.len())
                         {
                             let suffix = escape_properties_value(&val_norm[old_p.len()..]);
                             let desired = format!("{}{}", proj_slash, suffix);
@@ -748,7 +797,11 @@ pub fn fix_properties_file_paths(
     }
 
     if changed {
-        let line_ending = if content.contains("\r\n") { "\r\n" } else { "\n" };
+        let line_ending = if content.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
         let mut final_text = updated_lines.join(line_ending);
         if content.ends_with('\n') {
             final_text.push_str(line_ending);
@@ -808,7 +861,10 @@ pub fn run_auto_config(
                 .unwrap_or_else(|| "properties".to_string());
             if let Some(ref jh) = active_java_home {
                 let safe_jh = to_batch_safe_path(jh).replace('\\', "/");
-                changes.push(format!("{} paths -> {}, JavaHome -> {}", prop_name, safe_proj, safe_jh));
+                changes.push(format!(
+                    "{} paths -> {}, JavaHome -> {}",
+                    prop_name, safe_proj, safe_jh
+                ));
             } else {
                 changes.push(format!("{} paths -> {}", prop_name, safe_proj));
             }
@@ -894,7 +950,8 @@ pub fn resolve_target_log_dirs(
                         );
                         for od_desk in find_onedrive_desktops() {
                             let od_str = od_desk.to_string_lossy().replace('\\', "/");
-                            let replaced = clean_slash.replace(&std_desk, od_str.trim_end_matches('/'));
+                            let replaced =
+                                clean_slash.replace(&std_desk, od_str.trim_end_matches('/'));
                             let od_candidate = PathBuf::from(replaced.replace('/', "\\"));
                             if is_path_within_dir(&od_candidate, base_proj) {
                                 raw_dirs.push(od_candidate);
@@ -1015,7 +1072,8 @@ fn parse_log4j_config_entries(file_path: &Path) -> Vec<(String, String)> {
             if let Some(dot_rel) = rest.find('.') {
                 let suffix = &rest[dot_rel + 1..];
                 if suffix == "file" {
-                    let appender_orig = &key["log4j.appender.".len().."log4j.appender.".len() + dot_rel];
+                    let appender_orig =
+                        &key["log4j.appender.".len().."log4j.appender.".len() + dot_rel];
                     if let Some(fname) = parse_log4j_appender_filename(val) {
                         entries.push((appender_orig.to_string(), fname));
                     }
@@ -1050,7 +1108,11 @@ pub fn discover_configured_log_files(
                 && !paths_equal_ci(&bdir, base_proj)
                 && !paths_equal_ci(&bdir, &source_batch_dir)
             {
-                candidates.push(bdir.join("batch").join("properties").join("stcliblog4j.properties"));
+                candidates.push(
+                    bdir.join("batch")
+                        .join("properties")
+                        .join("stcliblog4j.properties"),
+                );
                 candidates.push(bdir.join("properties").join("stcliblog4j.properties"));
                 candidates.push(bdir.join("stcliblog4j.properties"));
             }
@@ -1079,7 +1141,11 @@ pub fn discover_configured_log_files(
 
     for root_dir in [base_proj.join("target"), base_proj.join("batch")] {
         if root_dir.is_dir() {
-            for entry in walkdir::WalkDir::new(&root_dir).max_depth(4).into_iter().flatten() {
+            for entry in walkdir::WalkDir::new(&root_dir)
+                .max_depth(4)
+                .into_iter()
+                .flatten()
+            {
                 if entry.file_type().is_file() {
                     let fname_lower = entry.file_name().to_string_lossy().to_lowercase();
                     if fname_lower.contains("log4j")
@@ -1168,8 +1234,14 @@ pub fn resolve_default_txt_editor() -> Option<String> {
         }
 
         const ASSOCSTR_EXECUTABLE: u32 = 2;
-        let ext: Vec<u16> = OsStr::new(".txt").encode_wide().chain(std::iter::once(0)).collect();
-        let verb: Vec<u16> = OsStr::new("open").encode_wide().chain(std::iter::once(0)).collect();
+        let ext: Vec<u16> = OsStr::new(".txt")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let verb: Vec<u16> = OsStr::new("open")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
 
         unsafe {
             let mut len: u32 = 0;
@@ -1307,7 +1379,10 @@ pub fn open_file_with_os_default(path: &str) -> Result<String, String> {
         }
 
         const SW_SHOWNORMAL: i32 = 1;
-        let op_w: Vec<u16> = OsStr::new("open").encode_wide().chain(std::iter::once(0)).collect();
+        let op_w: Vec<u16> = OsStr::new("open")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
         let file_w: Vec<u16> = OsStr::new(&target_str)
             .encode_wide()
             .chain(std::iter::once(0))
@@ -1439,6 +1514,123 @@ pub fn open_target_log_file(
     Err(format!("Log file not found:\n{}", expected_path))
 }
 
+/// Safely clear (truncate to 0 bytes) all target `.log` files for the selected project/target.
+/// Never touches `.bat` scripts, app settings/history JSON files, or excluded source `<project>/log` folders.
+pub fn clear_target_log_files(
+    project_path: Option<&str>,
+    target: Option<&str>,
+    log_folder_path: Option<&str>,
+    batch_log_name: Option<&str>,
+    app_log_name: Option<&str>,
+) -> Result<ClearLogsResult, String> {
+    let mut candidate_dirs: Vec<PathBuf> = Vec::new();
+    let proj_opt = project_path
+        .map(|s| s.trim().trim_matches('"').replace('/', "\\"))
+        .filter(|s| !s.is_empty());
+
+    if let Some(ref proj_str) = proj_opt {
+        let build_dir = find_build_dir(proj_str);
+        let prop_file = build_dir
+            .as_ref()
+            .and_then(|bd| target.and_then(|t| find_properties_for_target(bd, t)));
+        let base_dir = prop_file.as_ref().and_then(|p| extract_base_directory(p));
+        candidate_dirs.extend(resolve_target_log_dirs(
+            proj_str,
+            prop_file.as_deref(),
+            base_dir.as_deref(),
+        ));
+    }
+
+    if let Some(dir_str) = log_folder_path {
+        let clean_dir = dir_str.trim().trim_matches('"').replace('/', "\\");
+        if !clean_dir.is_empty() {
+            let dir_path = PathBuf::from(&clean_dir);
+            let excluded = proj_opt
+                .as_deref()
+                .map(|p| is_excluded_source_log_dir(&dir_path, Path::new(p)))
+                .unwrap_or(false);
+            let within_proj = proj_opt
+                .as_deref()
+                .map(|p| is_path_within_dir(&dir_path, Path::new(p)))
+                .unwrap_or(false);
+            if !excluded && within_proj {
+                candidate_dirs.push(dir_path);
+            }
+        }
+    }
+
+    let mut deduped_dirs: Vec<PathBuf> = Vec::new();
+    let mut seen_dirs = std::collections::HashSet::new();
+    for dir in candidate_dirs {
+        let expanded = resolve_long_path_best_effort(&dir);
+        let key = normalize_path_key(&expanded);
+        if !key.is_empty() && seen_dirs.insert(key) {
+            deduped_dirs.push(expanded);
+        }
+    }
+
+    let mut log_dirs_checked: Vec<String> = Vec::new();
+    let mut candidate_files: Vec<PathBuf> = Vec::new();
+    let mut seen_files = std::collections::HashSet::new();
+
+    for dir in &deduped_dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        log_dirs_checked.push(dir.to_string_lossy().replace('/', "\\"));
+
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let is_log = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.eq_ignore_ascii_case("log"))
+                        .unwrap_or(false);
+                    if is_log {
+                        let key = normalize_path_key(&path);
+                        if seen_files.insert(key) {
+                            candidate_files.push(path);
+                        }
+                    }
+                }
+            }
+        }
+
+        for extra_name in [batch_log_name, app_log_name].into_iter().flatten() {
+            let trimmed = extra_name.trim();
+            if !trimmed.is_empty() {
+                let extra_path = dir.join(trimmed);
+                if extra_path.is_file() {
+                    let key = normalize_path_key(&extra_path);
+                    if seen_files.insert(key) {
+                        candidate_files.push(extra_path);
+                    }
+                }
+            }
+        }
+    }
+
+    candidate_files.sort_by(|a, b| a.to_string_lossy().to_lowercase().cmp(&b.to_string_lossy().to_lowercase()));
+
+    let mut cleared_files = Vec::new();
+    let mut failed_files = Vec::new();
+    for file_path in candidate_files {
+        let display = file_path.to_string_lossy().replace('/', "\\");
+        match fs::OpenOptions::new().write(true).truncate(true).open(&file_path) {
+            Ok(_) => cleared_files.push(display),
+            Err(err) => failed_files.push(format!("{}: {}", display, err)),
+        }
+    }
+
+    Ok(ClearLogsResult {
+        cleared_files,
+        failed_files,
+        log_dirs_checked,
+    })
+}
+
 fn normalize_path_key(p: &Path) -> String {
     let s = p.to_string_lossy().replace('/', "\\");
     s.trim_end_matches('\\').to_lowercase()
@@ -1487,7 +1679,10 @@ pub fn scan_custom_bat_folder(folder_path: &str) -> (Option<String>, Vec<BatFile
 /// Find batch/batfiles strictly inside the built target folder (never fall back to source batch/batfiles).
 /// Checks the selected project's own target folders first, rejects paths outside `project_path`,
 /// and expands 8.3 short segments back to full readable Unicode paths when `project_path` is not short.
-pub fn scan_bat_files(project_path: &str, base_dir_str: Option<&str>) -> (Option<PathBuf>, Vec<BatFileInfo>) {
+pub fn scan_bat_files(
+    project_path: &str,
+    base_dir_str: Option<&str>,
+) -> (Option<PathBuf>, Vec<BatFileInfo>) {
     let clean_proj_str = project_path.trim().trim_matches('"').replace('/', "\\");
     let base_proj = Path::new(&clean_proj_str);
     let source_batch_dir = base_proj.join("batch");
@@ -1544,7 +1739,9 @@ pub fn scan_bat_files(project_path: &str, base_dir_str: Option<&str>) -> (Option
     }
 
     for folder in candidate_folders {
-        if paths_equal_ci(&folder, &source_batfiles_dir) || paths_equal_ci(&folder, &source_batch_dir) {
+        if paths_equal_ci(&folder, &source_batfiles_dir)
+            || paths_equal_ci(&folder, &source_batch_dir)
+        {
             continue;
         }
         if folder.is_dir() {
@@ -1576,7 +1773,8 @@ pub fn scan_bat_files(project_path: &str, base_dir_str: Option<&str>) -> (Option
                     .unwrap_or(false);
                 if is_batfiles {
                     let dir_path = entry.path().to_path_buf();
-                    let display_dir = if !proj_has_tilde && dir_path.to_string_lossy().contains('~') {
+                    let display_dir = if !proj_has_tilde && dir_path.to_string_lossy().contains('~')
+                    {
                         to_display_long_path(&dir_path)
                     } else {
                         dir_path
@@ -1629,7 +1827,10 @@ fn list_bat_files_in_dir(dir: &Path) -> Vec<BatFileInfo> {
 struct ChronoLite(u64);
 impl From<std::time::SystemTime> for ChronoLite {
     fn from(t: std::time::SystemTime) -> Self {
-        let secs = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let secs = t
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         ChronoLite(secs)
     }
 }
@@ -1690,7 +1891,9 @@ impl std::fmt::Display for ChronoLite {
 /// Inspect target post-build or directly
 pub fn inspect_target_files(project_path: &str, target: &str) -> PostBuildInspection {
     let build_dir = find_build_dir(project_path);
-    let prop_file = build_dir.as_ref().and_then(|bd| find_properties_for_target(bd, target));
+    let prop_file = build_dir
+        .as_ref()
+        .and_then(|bd| find_properties_for_target(bd, target));
 
     let base_dir = prop_file.as_ref().and_then(|p| extract_base_directory(p));
     let (bat_folder, bat_files) = scan_bat_files(project_path, base_dir.as_deref());
@@ -1698,13 +1901,23 @@ pub fn inspect_target_files(project_path: &str, target: &str) -> PostBuildInspec
         discover_configured_log_files(project_path, base_dir.as_deref());
 
     let (log_file_path, batch_log_folder) = if let Some(ref b_name) = batch_log_name {
-        resolve_log_file(project_path, prop_file.as_deref(), base_dir.as_deref(), b_name)
+        resolve_log_file(
+            project_path,
+            prop_file.as_deref(),
+            base_dir.as_deref(),
+            b_name,
+        )
     } else {
         (None, None)
     };
 
     let (app_log_file_path, app_log_folder) = if let Some(ref a_name) = app_log_name {
-        resolve_log_file(project_path, prop_file.as_deref(), base_dir.as_deref(), a_name)
+        resolve_log_file(
+            project_path,
+            prop_file.as_deref(),
+            base_dir.as_deref(),
+            a_name,
+        )
     } else {
         (None, None)
     };
@@ -1738,8 +1951,12 @@ pub fn run_ant_build(
     ant_executable: Option<String>,
     _java_home: Option<String>,
 ) -> Result<BuildResult, String> {
-    let build_dir = find_build_dir(&project_path)
-        .ok_or_else(|| format!("Cannot find build.xml in '{}' or its 'build' subfolder", project_path))?;
+    let build_dir = find_build_dir(&project_path).ok_or_else(|| {
+        format!(
+            "Cannot find build.xml in '{}' or its 'build' subfolder",
+            project_path
+        )
+    })?;
 
     let emit_line = |h: &AppHandle, t_id: &str, l: String| {
         let _ = h.emit(
@@ -1780,7 +1997,10 @@ pub fn run_ant_build(
     // This prevents Java 18+ (JEP 400 UTF-8 default) from writing UTF-8 @argfiles when javac expects MS932
     if let Ok(xml_bytes) = fs::read(build_dir.join("build.xml")) {
         let (xml_str, _) = detect_and_decode_text(&xml_bytes);
-        if xml_str.contains("MS932") || xml_str.contains("Shift-JIS") || xml_str.contains("Shift_JIS") {
+        if xml_str.contains("MS932")
+            || xml_str.contains("Shift-JIS")
+            || xml_str.contains("Shift_JIS")
+        {
             let existing_opts = std::env::var("ANT_OPTS").unwrap_or_default();
             if !existing_opts.contains("file.encoding") {
                 let new_opts = if existing_opts.trim().is_empty() {
@@ -1849,7 +2069,9 @@ pub fn run_ant_build(
         }
     });
 
-    let status = child.wait().map_err(|e| format!("Process wait error: {}", e))?;
+    let status = child
+        .wait()
+        .map_err(|e| format!("Process wait error: {}", e))?;
     let _ = out_thread.join();
     let _ = err_thread.join();
 
@@ -1923,131 +2145,115 @@ pub fn encode_utf16le_base64(script: &str) -> String {
     out
 }
 
-/// Build PowerShell script to resize console, run `.\<file_name>`, and optionally capture to clipboard.
-pub fn build_powershell_run_script(
-    parent_dir: &str,
-    file_name: &str,
-    setting: &crate::modules::app_config::UserSetting,
-) -> String {
-    let safe_dir = parent_dir.replace('\'', "''");
-    let safe_file = file_name.replace('\'', "''");
-    let width = setting.ps_window_width;
-    let height = setting.ps_window_height;
+fn ps_escape_single(s: &str) -> String {
+    s.replace('\'', "''")
+}
 
-    let capture_block = if setting.auto_capture_clipboard {
-        r#"
-try {
-    Start-Sleep -Milliseconds 300
-    $hwnd = [Win32Cap]::GetConsoleWindow()
-    if ($hwnd -ne [IntPtr]::Zero) {
-        $winRect = New-Object Win32Cap+RECT
-        [Win32Cap]::GetWindowRect($hwnd, [ref]$winRect) | Out-Null
-        $fullW = $winRect.Right - $winRect.Left
-        $fullH = $winRect.Bottom - $winRect.Top
+/// Generate a unique `.ps1` script path in `%TEMP%`.
+pub fn allocate_temp_ps1_path(prefix: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = PS_SCRIPT_SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "{}_{}_{}_{}.ps1",
+        prefix,
+        std::process::id(),
+        nanos,
+        seq
+    ))
+}
 
-        $dwmRect = New-Object Win32Cap+RECT
-        $hr = [Win32Cap]::DwmGetWindowAttribute($hwnd, 9, [ref]$dwmRect, [System.Runtime.InteropServices.Marshal]::SizeOf($dwmRect))
-        if ($hr -eq 0 -and ($dwmRect.Right - $dwmRect.Left) -gt 0 -and ($dwmRect.Bottom - $dwmRect.Top) -gt 0) {
-            $capRect = $dwmRect
-        } else {
-            $capRect = $winRect
-        }
+/// Write a PowerShell script as UTF-8 with BOM so PowerShell 5.1 preserves non-ASCII paths accurately.
+pub fn write_ps1_with_bom(path: &Path, script: &str) -> Result<(), String> {
+    let mut bytes = Vec::with_capacity(3 + script.len());
+    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    bytes.extend_from_slice(script.as_bytes());
+    fs::write(path, &bytes).map_err(|e| {
+        format!(
+            "Failed to write PowerShell runner '{}': {}",
+            path.display(),
+            e
+        )
+    })
+}
 
-        $capW = $capRect.Right - $capRect.Left
-        $capH = $capRect.Bottom - $capRect.Top
+/// Append self-cleanup statement so a launched `.ps1` file removes itself from `%TEMP%`.
+pub fn append_ps1_self_cleanup(script: &str, ps1_path: &Path) -> String {
+    let safe_ps1 = ps_escape_single(&ps1_path.to_string_lossy());
+    format!(
+        "{}\r\ntry {{ Remove-Item -LiteralPath '{}' -Force -ErrorAction SilentlyContinue }} catch {{}}\r\n",
+        script.trim_end(),
+        safe_ps1
+    )
+}
 
-        if ($fullW -gt 0 -and $fullH -gt 0 -and $capW -gt 0 -and $capH -gt 0) {
-            $finalBmp = $null
-            $tmpBmp = New-Object System.Drawing.Bitmap($fullW, $fullH)
-            $tmpG = [System.Drawing.Graphics]::FromImage($tmpBmp)
-            $hdc = $tmpG.GetHdc()
-            $pwOk = $false
-            try {
-                $pwOk = [Win32Cap]::PrintWindow($hwnd, $hdc, 2)
-            } finally {
-                $tmpG.ReleaseHdc($hdc)
-                $tmpG.Dispose()
+/// Spawn `conhost.exe powershell.exe <args...>` so `GetConsoleWindow()` resolves cleanly,
+/// with `CREATE_NEW_CONSOLE` fallback to direct `powershell.exe` if `conhost.exe` fails to start.
+pub fn spawn_conhost_powershell(
+    parent: &Path,
+    ps_args: &[&str],
+) -> Result<std::process::Child, String> {
+    let mut conhost_args = Vec::with_capacity(1 + ps_args.len());
+    conhost_args.push("powershell.exe");
+    conhost_args.extend_from_slice(ps_args);
+
+    // Do NOT redirect conhost.exe stdio to NUL (Stdio::null()): conhost exits immediately when stdio handles are nulled.
+    match Command::new("conhost.exe")
+        .args(&conhost_args)
+        .current_dir(parent)
+        .spawn()
+    {
+        Ok(child) => Ok(child),
+        Err(conhost_err) => {
+            #[cfg(windows)]
+            {
+                const CREATE_NEW_CONSOLE: u32 = 0x00000010;
+                Command::new("powershell.exe")
+                    .args(ps_args)
+                    .current_dir(parent)
+                    .creation_flags(CREATE_NEW_CONSOLE)
+                    .spawn()
+                    .map_err(|ps_err| {
+                        format!(
+                            "Failed to launch PowerShell console (conhost: {}; powershell: {})",
+                            conhost_err, ps_err
+                        )
+                    })
             }
 
-            if ($pwOk) {
-                $cropX = [Math]::Max(0, $capRect.Left - $winRect.Left)
-                $cropY = [Math]::Max(0, $capRect.Top - $winRect.Top)
-                $cropW = [Math]::Min($capW, $fullW - $cropX)
-                $cropH = [Math]::Min($capH, $fullH - $cropY)
-                if ($cropW -gt 0 -and $cropH -gt 0) {
-                    $pts = @(
-                        @([Math]::Min($fullW - 1, $cropX + 20), [Math]::Min($fullH - 1, $cropY + 12)),
-                        @([Math]::Min($fullW - 1, $cropX + [int]($cropW / 2)), [Math]::Min($fullH - 1, $cropY + [int]($cropH / 2))),
-                        @([Math]::Min($fullW - 1, $cropX + [int]($cropW / 3)), [Math]::Min($fullH - 1, $cropY + [int]($cropH / 3))),
-                        @([Math]::Min($fullW - 1, $cropX + [int](($cropW * 2) / 3)), [Math]::Min($fullH - 1, $cropY + [int]($cropH / 2))),
-                        @([Math]::Min($fullW - 1, $cropX + $cropW - 20), [Math]::Min($fullH - 1, $cropY + $cropH - 20))
-                    )
-                    $hasContent = $false
-                    foreach ($pt in $pts) {
-                        $px = $tmpBmp.GetPixel([Math]::Max(0, $pt[0]), [Math]::Max(0, $pt[1]))
-                        if ($px.A -ne 0 -or $px.R -ne 0 -or $px.G -ne 0 -or $px.B -ne 0) {
-                            $hasContent = $true
-                            break
-                        }
-                    }
-                    if ($hasContent) {
-                        $finalBmp = New-Object System.Drawing.Bitmap($cropW, $cropH)
-                        $fg = [System.Drawing.Graphics]::FromImage($finalBmp)
-                        $srcRect = New-Object System.Drawing.Rectangle($cropX, $cropY, $cropW, $cropH)
-                        $dstRect = New-Object System.Drawing.Rectangle(0, 0, $cropW, $cropH)
-                        $fg.DrawImage($tmpBmp, $dstRect, $srcRect, [System.Drawing.GraphicsUnit]::Pixel)
-                        $fg.Dispose()
-                    }
-                }
-            }
-            $tmpBmp.Dispose()
-
-            if ($null -eq $finalBmp) {
-                [Win32Cap]::SetForegroundWindow($hwnd) | Out-Null
-                Start-Sleep -Milliseconds 150
-                $finalBmp = New-Object System.Drawing.Bitmap($capW, $capH)
-                $sg = [System.Drawing.Graphics]::FromImage($finalBmp)
-                $sz = New-Object System.Drawing.Size($capW, $capH)
-                $sg.CopyFromScreen($capRect.Left, $capRect.Top, 0, 0, $sz, [System.Drawing.CopyPixelOperation]::SourceCopy)
-                $sg.Dispose()
-            }
-
-            if ($null -ne $finalBmp) {
-                for ($i = 0; $i -lt 3; $i++) {
-                    try {
-                        [System.Windows.Forms.Clipboard]::SetImage($finalBmp)
-                        break
-                    } catch {
-                        Start-Sleep -Milliseconds 100
-                    }
-                }
-                $finalBmp.Dispose()
+            #[cfg(not(windows))]
+            {
+                let _ = conhost_err;
+                Command::new("powershell")
+                    .args(ps_args)
+                    .current_dir(parent)
+                    .spawn()
+                    .map_err(|e| e.to_string())
             }
         }
     }
-} catch {}
-"#
-    } else {
-        ""
-    };
+}
 
-    let post_run_block = if setting.auto_capture_clipboard {
-        format!(
-            r#"$global:__bh_cap_done = $false
-function global:prompt {{
-    $p = 'PS ' + (Get-Location).Path + '>'
-    if (-not $global:__bh_cap_done) {{
-        $global:__bh_cap_done = $true
-        Write-Host -NoNewline $p
-        {capture_block}
-        return ' '
-    }}
-    return ($p + ' ')
-}}"#,
-            capture_block = capture_block
-        )
-    } else {
-        String::new()
+/// Shared Win32 C# interop + Per-Monitor DPI setup + clamped monitor-centered MoveWindow preamble.
+fn build_ps_win32_preamble(
+    file_name: &str,
+    width: u32,
+    height: u32,
+    monitor_anchor: Option<(i32, i32)>,
+) -> String {
+    let safe_file = ps_escape_single(file_name);
+    let monitor_lookup_stmt = match monitor_anchor {
+        Some((ax, ay)) => format!(
+            r#"        $__pt = New-Object Win32Cap+POINT
+        $__pt.X = {ax}
+        $__pt.Y = {ay}
+        $hMon = [Win32Cap]::MonitorFromPoint($__pt, 2)"#,
+            ax = ax,
+            ay = ay
+        ),
+        None => r#"        $hMon = [Win32Cap]::MonitorFromWindow($hwnd, 1)"#.to_string(),
     };
 
     format!(
@@ -2066,6 +2272,20 @@ public class Win32Cap {{
         public int Bottom;
     }}
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT {{
+        public int X;
+        public int Y;
+    }}
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MONITORINFO {{
+        public int cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+    }}
+
     [DllImport("kernel32.dll")]
     public static extern IntPtr GetConsoleWindow();
 
@@ -2079,6 +2299,12 @@ public class Win32Cap {{
     public static extern bool SetForegroundWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
     public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
 
     [DllImport("user32.dll")]
@@ -2086,6 +2312,15 @@ public class Win32Cap {{
 
     [DllImport("user32.dll")]
     public static extern IntPtr SetProcessDpiAwarenessContext(IntPtr dpiContext);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetMonitorInfoW(IntPtr hMonitor, ref MONITORINFO lpmi);
 
     [DllImport("dwmapi.dll")]
     public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
@@ -2095,6 +2330,9 @@ try {{ [Win32Cap]::SetProcessDpiAwarenessContext([IntPtr](-4)) | Out-Null }} cat
 $Host.UI.RawUI.WindowTitle = '{safe_file}'
 try {{
     $hwnd = [Win32Cap]::GetConsoleWindow()
+    if ($hwnd -eq [IntPtr]::Zero) {{
+        try {{ $hwnd = (Get-Process -Id $PID).MainWindowHandle }} catch {{}}
+    }}
     if ($hwnd -ne [IntPtr]::Zero) {{
         $maxSize = $Host.UI.RawUI.MaxPhysicalWindowSize
         $buf = $Host.UI.RawUI.BufferSize
@@ -2102,10 +2340,30 @@ try {{
         $buf.Height = [Math]::Max($buf.Height, 3000)
         $Host.UI.RawUI.BufferSize = $buf
 
-        $workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-        $x = $workArea.Left + [Math]::Max(0, [int](($workArea.Width - {width}) / 2))
-        $y = $workArea.Top + [Math]::Max(0, [int](($workArea.Height - {height}) / 2))
-        [Win32Cap]::MoveWindow($hwnd, $x, $y, {width}, {height}, $true) | Out-Null
+{monitor_lookup_stmt}
+        $mi = New-Object Win32Cap+MONITORINFO
+        $mi.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($mi)
+        $gotMi = ($hMon -ne [IntPtr]::Zero) -and ([Win32Cap]::GetMonitorInfoW($hMon, [ref]$mi))
+        if ($gotMi -and ($mi.rcWork.Right - $mi.rcWork.Left) -gt 0 -and ($mi.rcWork.Bottom - $mi.rcWork.Top) -gt 0) {{
+            $workLeft = $mi.rcWork.Left
+            $workTop = $mi.rcWork.Top
+            $workRight = $mi.rcWork.Right
+            $workBottom = $mi.rcWork.Bottom
+        }} else {{
+            $primaryWa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+            $workLeft = $primaryWa.Left
+            $workTop = $primaryWa.Top
+            $workRight = $primaryWa.Right
+            $workBottom = $primaryWa.Bottom
+        }}
+
+        $workW = [Math]::Max(320, $workRight - $workLeft)
+        $workH = [Math]::Max(240, $workBottom - $workTop)
+        $targetW = [Math]::Min([Math]::Max(320, {width}), $workW)
+        $targetH = [Math]::Min([Math]::Max(240, {height}), $workH)
+        $x = $workLeft + [Math]::Max(0, [int](($workW - $targetW) / 2))
+        $y = $workTop + [Math]::Max(0, [int](($workH - $targetH) / 2))
+        [Win32Cap]::MoveWindow($hwnd, $x, $y, $targetW, $targetH, $true) | Out-Null
         Start-Sleep -Milliseconds 100
 
         $winSize = $Host.UI.RawUI.WindowSize
@@ -2113,24 +2371,496 @@ try {{
         $newBuf.Width = $winSize.Width
         $newBuf.Height = [Math]::Max($newBuf.Height, $winSize.Height)
         $Host.UI.RawUI.BufferSize = $newBuf
+
+        # Second pass: re-center using exact cell-snapped outer pixel size so no edge crosses monitor bounds
+        $actRect = New-Object Win32Cap+RECT
+        if ([Win32Cap]::GetWindowRect($hwnd, [ref]$actRect)) {{
+            $actW = [Math]::Max(1, $actRect.Right - $actRect.Left)
+            $actH = [Math]::Max(1, $actRect.Bottom - $actRect.Top)
+            $cx = $workLeft + [int](($workW - $actW) / 2)
+            $cy = $workTop + [int](($workH - $actH) / 2)
+            $cx = [Math]::Max($workLeft, [Math]::Min($cx, $workRight - $actW))
+            $cy = [Math]::Max($workTop, [Math]::Min($cy, $workBottom - $actH))
+            [Win32Cap]::MoveWindow($hwnd, $cx, $cy, $actW, $actH, $true) | Out-Null
+            Start-Sleep -Milliseconds 50
+        }}
     }}
 }} catch {{}}
-Set-Location -LiteralPath '{safe_dir}'
-Clear-Host
-Write-Host ('PS ' + (Get-Location).Path + '> .\{safe_file}')
-& '.\{safe_file}'
-{post_run_block}
 "#,
         safe_file = safe_file,
-        safe_dir = safe_dir,
+        monitor_lookup_stmt = monitor_lookup_stmt,
         width = width,
-        height = height,
-        post_run_block = post_run_block
+        height = height
     )
 }
 
-/// Launch a .bat file in a dedicated Win32 console PowerShell window (`.\<file.bat>`).
-pub fn execute_bat_in_powershell(path: &str) -> Result<(), String> {
+fn ps_write_status_stmt(st_path: &str, expr: &str) -> String {
+    let safe_st = ps_escape_single(st_path);
+    format!(
+        "try {{ [System.IO.File]::WriteAllText('{safe_st}', {expr}, (New-Object System.Text.UTF8Encoding($false))) }} catch {{}}",
+        safe_st = safe_st,
+        expr = expr
+    )
+}
+
+/// Shared PowerShell bitmap capture block (clipboard copy + deterministic PNG overwrite save).
+fn build_ps_capture_block(
+    save_clipboard: bool,
+    save_image_path: Option<&str>,
+    status_file_path: Option<&str>,
+) -> String {
+    let clipboard_stmt = if save_clipboard {
+        r#"
+                for ($i = 0; $i -lt 3; $i++) {
+                    try {
+                        [System.Windows.Forms.Clipboard]::SetImage($finalBmp)
+                        break
+                    } catch {
+                        Start-Sleep -Milliseconds 100
+                    }
+                }
+"#
+    } else {
+        ""
+    };
+
+    let save_file_stmt = if let Some(png_path) = save_image_path {
+        let safe_png = ps_escape_single(png_path);
+        let status_write = status_file_path
+            .map(|st| {
+                format!(
+                    "\n                    {}\n",
+                    ps_write_status_stmt(st, "'OK'")
+                )
+            })
+            .unwrap_or_default();
+        let status_err_write = status_file_path
+            .map(|st| {
+                format!(
+                    "\n                    {}\n",
+                    ps_write_status_stmt(st, "('ERR:' + $__bh_shot_err)")
+                )
+            })
+            .unwrap_or_default();
+
+        format!(
+            r#"
+                try {{
+                    $__bh_png_path = '{safe_png}'
+                    $__bh_png_dir = [System.IO.Path]::GetDirectoryName($__bh_png_path)
+                    if ($__bh_png_dir) {{
+                        [System.IO.Directory]::CreateDirectory($__bh_png_dir) | Out-Null
+                    }}
+                    $__bh_fs = New-Object System.IO.FileStream($__bh_png_path, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+                    try {{
+                        $finalBmp.Save($__bh_fs, [System.Drawing.Imaging.ImageFormat]::Png)
+                        $__bh_fs.Flush()
+                    }} finally {{
+                        $__bh_fs.Dispose()
+                    }}
+                    if ([System.IO.File]::Exists($__bh_png_path) -and (Get-Item -LiteralPath $__bh_png_path).Length -gt 0) {{
+                        $__bh_shot_ok = $true
+                        {status_write}
+                    }} else {{
+                        $__bh_shot_ok = $false
+                        $__bh_shot_err = 'Screenshot PNG file was empty or missing after save.'
+                        {status_err_write}
+                    }}
+                }} catch {{
+                    $__bh_shot_ok = $false
+                    $__bh_shot_err = $_.Exception.Message
+                    if (-not $__bh_shot_err) {{ $__bh_shot_err = [string]$_ }}
+                    {status_err_write}
+                }}
+"#,
+            safe_png = safe_png,
+            status_write = status_write,
+            status_err_write = status_err_write
+        )
+    } else {
+        String::new()
+    };
+
+    let no_bmp_status_write = match (save_image_path, status_file_path) {
+        (Some(_), Some(st_path)) => {
+            let err_stmt = ps_write_status_stmt(st_path, "('ERR:' + $__bh_shot_err)");
+            format!(
+                r#"
+    if (-not $__bh_shot_ok -and [string]::IsNullOrEmpty($__bh_shot_err)) {{
+        $__bh_shot_err = 'Failed to capture console window bitmap.'
+    }}
+    if (-not $__bh_shot_ok) {{
+        {err_stmt}
+    }}
+"#,
+                err_stmt = err_stmt
+            )
+        }
+        (Some(_), None) => r#"
+    if (-not $__bh_shot_ok -and [string]::IsNullOrEmpty($__bh_shot_err)) {
+        $__bh_shot_err = 'Failed to capture console window bitmap.'
+    }
+"#
+        .to_string(),
+        _ => String::new(),
+    };
+
+    let catch_status_write = if let (Some(_), Some(st_path)) = (save_image_path, status_file_path) {
+        format!(
+            "\n    {}\n",
+            ps_write_status_stmt(st_path, "('ERR:' + $__bh_shot_err)")
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        r#"
+$__bh_shot_ok = $false
+$__bh_shot_err = ''
+try {{
+    Start-Sleep -Milliseconds 300
+    $hwnd = [Win32Cap]::GetConsoleWindow()
+    if ($hwnd -eq [IntPtr]::Zero) {{
+        try {{ $hwnd = (Get-Process -Id $PID).MainWindowHandle }} catch {{}}
+    }}
+    if ($hwnd -ne [IntPtr]::Zero) {{
+        if ([Win32Cap]::IsIconic($hwnd)) {{
+            [Win32Cap]::ShowWindow($hwnd, 9) | Out-Null
+            Start-Sleep -Milliseconds 150
+        }}
+
+        $winRect = New-Object Win32Cap+RECT
+        [Win32Cap]::GetWindowRect($hwnd, [ref]$winRect) | Out-Null
+        $fullW = $winRect.Right - $winRect.Left
+        $fullH = $winRect.Bottom - $winRect.Top
+
+        $dwmRect = New-Object Win32Cap+RECT
+        $hr = [Win32Cap]::DwmGetWindowAttribute($hwnd, 9, [ref]$dwmRect, [System.Runtime.InteropServices.Marshal]::SizeOf($dwmRect))
+        if ($hr -eq 0 -and ($dwmRect.Right - $dwmRect.Left) -gt 0 -and ($dwmRect.Bottom - $dwmRect.Top) -gt 0) {{
+            $capRect = $dwmRect
+        }} else {{
+            $capRect = $winRect
+        }}
+
+        $capW = $capRect.Right - $capRect.Left
+        $capH = $capRect.Bottom - $capRect.Top
+
+        if ($fullW -gt 0 -and $fullH -gt 0 -and $capW -gt 0 -and $capH -gt 0) {{
+            $finalBmp = $null
+            foreach ($pwFlags in @(2, 0)) {{
+                $tmpBmp = New-Object System.Drawing.Bitmap($fullW, $fullH)
+                $tmpG = [System.Drawing.Graphics]::FromImage($tmpBmp)
+                $hdc = $tmpG.GetHdc()
+                $pwOk = $false
+                try {{
+                    $pwOk = [Win32Cap]::PrintWindow($hwnd, $hdc, [uint32]$pwFlags)
+                }} finally {{
+                    $tmpG.ReleaseHdc($hdc)
+                    $tmpG.Dispose()
+                }}
+
+                if ($pwOk) {{
+                    $cropX = [Math]::Max(0, $capRect.Left - $winRect.Left)
+                    $cropY = [Math]::Max(0, $capRect.Top - $winRect.Top)
+                    $cropW = [Math]::Min($capW, $fullW - $cropX)
+                    $cropH = [Math]::Min($capH, $fullH - $cropY)
+                    if ($cropW -gt 0 -and $cropH -gt 0) {{
+                        $pts = @(
+                            @([Math]::Min($fullW - 1, $cropX + 20), [Math]::Min($fullH - 1, $cropY + 12)),
+                            @([Math]::Min($fullW - 1, $cropX + [int]($cropW / 2)), [Math]::Min($fullH - 1, $cropY + [int]($cropH / 2))),
+                            @([Math]::Min($fullW - 1, $cropX + [int]($cropW / 3)), [Math]::Min($fullH - 1, $cropY + [int]($cropH / 3))),
+                            @([Math]::Min($fullW - 1, $cropX + [int](($cropW * 2) / 3)), [Math]::Min($fullH - 1, $cropY + [int]($cropH / 2))),
+                            @([Math]::Min($fullW - 1, $cropX + $cropW - 20), [Math]::Min($fullH - 1, $cropY + $cropH - 20))
+                        )
+                        $hasContent = $false
+                        foreach ($pt in $pts) {{
+                            $px = $tmpBmp.GetPixel([Math]::Max(0, $pt[0]), [Math]::Max(0, $pt[1]))
+                            if ($px.A -ne 0 -or $px.R -ne 0 -or $px.G -ne 0 -or $px.B -ne 0) {{
+                                $hasContent = $true
+                                break
+                            }}
+                        }}
+                        if ($hasContent) {{
+                            $finalBmp = New-Object System.Drawing.Bitmap($cropW, $cropH)
+                            $fg = [System.Drawing.Graphics]::FromImage($finalBmp)
+                            $srcRect = New-Object System.Drawing.Rectangle($cropX, $cropY, $cropW, $cropH)
+                            $dstRect = New-Object System.Drawing.Rectangle(0, 0, $cropW, $cropH)
+                            $fg.DrawImage($tmpBmp, $dstRect, $srcRect, [System.Drawing.GraphicsUnit]::Pixel)
+                            $fg.Dispose()
+                        }}
+                    }}
+                }}
+                $tmpBmp.Dispose()
+                if ($null -ne $finalBmp) {{ break }}
+            }}
+
+            if ($null -eq $finalBmp) {{
+                [Win32Cap]::SetForegroundWindow($hwnd) | Out-Null
+                Start-Sleep -Milliseconds 150
+                $finalBmp = New-Object System.Drawing.Bitmap($capW, $capH)
+                $sg = [System.Drawing.Graphics]::FromImage($finalBmp)
+                $sz = New-Object System.Drawing.Size($capW, $capH)
+                $sg.CopyFromScreen($capRect.Left, $capRect.Top, 0, 0, $sz, [System.Drawing.CopyPixelOperation]::SourceCopy)
+                $sg.Dispose()
+            }}
+
+            if ($null -ne $finalBmp) {{
+                {clipboard_stmt}
+                {save_file_stmt}
+                $finalBmp.Dispose()
+            }}
+        }} else {{
+            $__bh_shot_err = "Invalid window dimensions ($fullW x $fullH) for screenshot capture."
+        }}
+    }} else {{
+        $__bh_shot_err = 'Console window handle (HWND) is unavailable for screenshot capture.'
+    }}
+    {no_bmp_status_write}
+}} catch {{
+    $__bh_shot_err = $_.Exception.Message
+    if (-not $__bh_shot_err) {{ $__bh_shot_err = [string]$_ }}
+    {catch_status_write}
+}}
+"#,
+        clipboard_stmt = clipboard_stmt,
+        save_file_stmt = save_file_stmt,
+        no_bmp_status_write = no_bmp_status_write,
+        catch_status_write = catch_status_write
+    )
+}
+
+fn build_ps_meta_write_block(meta_file_path: &str) -> String {
+    let safe_meta = ps_escape_single(meta_file_path);
+    format!(
+        r#"try {{
+    $__metaObj = @{{
+        exit_code = $__bh_exit
+        screenshot_saved = [bool]$__bh_shot_ok
+        screenshot_error = if ($__bh_shot_ok -or [string]::IsNullOrEmpty($__bh_shot_err)) {{ $null }} else {{ $__bh_shot_err }}
+    }}
+    $__json = $__metaObj | ConvertTo-Json -Compress
+    $__sb = New-Object System.Text.StringBuilder
+    foreach ($__ch in $__json.ToCharArray()) {{
+        $__code = [int][char]$__ch
+        if ($__code -le 127) {{
+            [void]$__sb.Append($__ch)
+        }} else {{
+            [void]$__sb.AppendFormat('\u{{0:x4}}', $__code)
+        }}
+    }}
+    [System.IO.File]::WriteAllText('{safe_meta}', $__sb.ToString(), [System.Text.Encoding]::ASCII)
+}} catch {{}}"#,
+        safe_meta = safe_meta
+    )
+}
+
+/// Build PowerShell script to center/resize console, run `.\<file_name>`, capture optional screenshot, and report metadata.
+pub fn build_powershell_run_script(
+    parent_dir: &str,
+    file_name: &str,
+    setting: &crate::modules::app_config::UserSetting,
+    save_image_path: Option<&str>,
+    meta_file_path: Option<&str>,
+) -> String {
+    build_powershell_run_script_on_monitor(
+        parent_dir,
+        file_name,
+        setting,
+        save_image_path,
+        meta_file_path,
+        None,
+    )
+}
+
+/// Monitor-aware PowerShell runner script builder for individual BAT execution.
+pub fn build_powershell_run_script_on_monitor(
+    parent_dir: &str,
+    file_name: &str,
+    setting: &crate::modules::app_config::UserSetting,
+    save_image_path: Option<&str>,
+    meta_file_path: Option<&str>,
+    monitor_anchor: Option<(i32, i32)>,
+) -> String {
+    let safe_dir = ps_escape_single(parent_dir);
+    let safe_file = ps_escape_single(file_name);
+    let preamble = build_ps_win32_preamble(
+        file_name,
+        setting.ps_window_width,
+        setting.ps_window_height,
+        monitor_anchor,
+    );
+
+    let need_capture = setting.auto_capture_clipboard || save_image_path.is_some();
+    let capture_block = if need_capture {
+        build_ps_capture_block(setting.auto_capture_clipboard, save_image_path, None)
+    } else {
+        "$__bh_shot_ok = $false\n$__bh_shot_err = ''".to_string()
+    };
+
+    let meta_block = meta_file_path
+        .map(build_ps_meta_write_block)
+        .unwrap_or_default();
+
+    let prompt_hook = if need_capture || meta_file_path.is_some() {
+        r#"$global:__bh_cap_done = $false
+function global:prompt {
+    $p = 'PS ' + (Get-Location).Path + '>'
+    if (-not $global:__bh_cap_done) {
+        $global:__bh_cap_done = $true
+        return ' '
+    }
+    return ($p + ' ')
+}"#
+    } else {
+        ""
+    };
+
+    format!(
+        r#"{preamble}
+Set-Location -LiteralPath '{safe_dir}'
+Clear-Host
+Write-Host ('PS ' + (Get-Location).Path + '> .\{safe_file}')
+$__bh_exit = 0
+$__bh_shot_ok = $false
+$__bh_shot_err = ''
+$global:LASTEXITCODE = 0
+try {{
+    & '.\{safe_file}'
+    if ($null -ne $LASTEXITCODE) {{
+        $__bh_exit = [int]$LASTEXITCODE
+    }} elseif (-not $?) {{
+        $__bh_exit = 1
+    }}
+}} catch {{
+    $__bh_exit = 1
+    Write-Host $_.Exception.Message -ForegroundColor Red
+}}
+Write-Host -NoNewline ('PS ' + (Get-Location).Path + '>')
+{capture_block}
+{meta_block}
+{prompt_hook}
+"#,
+        preamble = preamble,
+        safe_file = safe_file,
+        safe_dir = safe_dir,
+        capture_block = capture_block,
+        meta_block = meta_block,
+        prompt_hook = prompt_hook
+    )
+}
+
+/// Build sequential PowerShell script for Group Run All with Auto Save Image PNG capture.
+pub fn build_powershell_group_step_script(
+    parent_dir: &str,
+    file_name: &str,
+    setting: &crate::modules::app_config::UserSetting,
+    save_image_path: &str,
+    out_file_path: &str,
+    meta_file_path: &str,
+) -> String {
+    build_powershell_group_step_script_on_monitor(
+        parent_dir,
+        file_name,
+        setting,
+        save_image_path,
+        out_file_path,
+        meta_file_path,
+        None,
+    )
+}
+
+/// Monitor-aware PowerShell script builder for sequential Group Run All steps.
+pub fn build_powershell_group_step_script_on_monitor(
+    parent_dir: &str,
+    file_name: &str,
+    setting: &crate::modules::app_config::UserSetting,
+    save_image_path: &str,
+    out_file_path: &str,
+    meta_file_path: &str,
+    monitor_anchor: Option<(i32, i32)>,
+) -> String {
+    let safe_dir = ps_escape_single(parent_dir);
+    let safe_file = ps_escape_single(file_name);
+    let safe_out = ps_escape_single(out_file_path);
+    let preamble = build_ps_win32_preamble(
+        file_name,
+        setting.ps_window_width,
+        setting.ps_window_height,
+        monitor_anchor,
+    );
+    let capture_block =
+        build_ps_capture_block(setting.auto_capture_clipboard, Some(save_image_path), None);
+    let meta_block = build_ps_meta_write_block(meta_file_path);
+
+    format!(
+        r#"{preamble}
+Set-Location -LiteralPath '{safe_dir}'
+Clear-Host
+$__bh_lines = New-Object System.Collections.Generic.List[string]
+Write-Host ('PS ' + (Get-Location).Path + '> .\{safe_file}')
+$__bh_exit = 0
+$global:LASTEXITCODE = 0
+try {{
+    & '.\{safe_file}' 2>&1 | ForEach-Object {{
+        $__s = $_.ToString()
+        $__bh_lines.Add($__s)
+        Write-Host $__s
+    }}
+    if ($null -ne $LASTEXITCODE) {{
+        $__bh_exit = [int]$LASTEXITCODE
+    }} elseif (-not $?) {{
+        $__bh_exit = 1
+    }}
+}} catch {{
+    $__errLine = $_.Exception.Message
+    if ($__errLine) {{ $__bh_lines.Add($__errLine) }}
+    $__bh_exit = 1
+}}
+Write-Host -NoNewline ('PS ' + (Get-Location).Path + '>')
+{capture_block}
+try {{
+    [System.IO.File]::WriteAllLines('{safe_out}', $__bh_lines, (New-Object System.Text.UTF8Encoding($false)))
+}} catch {{}}
+{meta_block}
+"#,
+        preamble = preamble,
+        safe_dir = safe_dir,
+        safe_file = safe_file,
+        capture_block = capture_block,
+        safe_out = safe_out,
+        meta_block = meta_block
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct GroupPsMeta {
+    exit_code: Option<i32>,
+    screenshot_saved: bool,
+    screenshot_error: Option<String>,
+}
+
+/// Launch a `.bat` file in a dedicated Win32 console PowerShell window (`.\<file.bat>`).
+pub fn execute_bat_in_powershell(
+    app: Option<AppHandle>,
+    tab_id: Option<&str>,
+    path: &str,
+    project_path: Option<&str>,
+    monitor_anchor: Option<(i32, i32)>,
+) -> Result<BatLaunchResult, String> {
+    let setting = crate::modules::app_config::load_user_setting();
+    execute_bat_in_powershell_with_setting(app, tab_id, path, project_path, &setting, monitor_anchor)
+}
+
+/// Parameterized `.bat` launcher for deterministic testing and live execution.
+pub fn execute_bat_in_powershell_with_setting(
+    app: Option<AppHandle>,
+    tab_id: Option<&str>,
+    path: &str,
+    project_path: Option<&str>,
+    setting: &crate::modules::app_config::UserSetting,
+    monitor_anchor: Option<(i32, i32)>,
+) -> Result<BatLaunchResult, String> {
     let clean_path = path.trim().trim_matches('"').replace('/', "\\");
     let p = Path::new(&clean_path);
     if !p.is_file() {
@@ -2143,92 +2873,198 @@ pub fn execute_bat_in_powershell(path: &str) -> Result<(), String> {
         .map(|n| n.to_string_lossy().to_string())
         .ok_or_else(|| "Invalid batch file name".to_string())?;
 
-    let setting = crate::modules::app_config::load_user_setting();
-    let script = build_powershell_run_script(&parent_str, &file_name, &setting);
-    let encoded = encode_utf16le_base64(&script);
+    let mut planned_png: Option<String> = None;
+    let mut screenshot_error: Option<String> = None;
 
-    // Prefer launching via conhost.exe so GetConsoleWindow() always resolves to the dedicated visible window
-    let conhost_res = Command::new("conhost.exe")
-        .args([
-            "powershell.exe",
+    if setting.auto_save_image {
+        let target_png = crate::modules::app_config::resolve_screenshot_output_path(
+            setting,
+            project_path,
+            &clean_path,
+        );
+        let parent_dir = target_png.parent().unwrap_or_else(|| Path::new("."));
+        match crate::modules::app_config::validate_writable_directory(parent_dir) {
+            Ok(()) => {
+                planned_png = Some(target_png.to_string_lossy().replace('/', "\\"));
+            }
+            Err(e) => {
+                screenshot_error = Some(e);
+            }
+        }
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = PS_SCRIPT_SEQ.fetch_add(1, Ordering::Relaxed);
+    let meta_file_path = std::env::temp_dir().join(format!(
+        "bh_single_meta_{}_{}_{}.json",
+        std::process::id(),
+        nanos,
+        seq
+    ));
+    let meta_file_str = meta_file_path.to_string_lossy().to_string();
+
+    let base_script = build_powershell_run_script_on_monitor(
+        &parent_str,
+        &file_name,
+        setting,
+        planned_png.as_deref(),
+        Some(&meta_file_str),
+        monitor_anchor,
+    );
+    let ps1_path = allocate_temp_ps1_path("bh_bat_run");
+    let full_script = append_ps1_self_cleanup(&base_script, &ps1_path);
+    write_ps1_with_bom(&ps1_path, &full_script)?;
+
+    let ps1_str = ps1_path.to_string_lossy().to_string();
+    let mut child = match spawn_conhost_powershell(
+        parent,
+        &[
             "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
             "-NoExit",
             "-STA",
-            "-EncodedCommand",
-            &encoded,
-        ])
-        .current_dir(parent)
-        .spawn();
+            "-File",
+            &ps1_str,
+        ],
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = fs::remove_file(&ps1_path);
+            let _ = fs::remove_file(&meta_file_path);
+            return Err(e);
+        }
+    };
 
-    if conhost_res.is_ok() {
-        return Ok(());
+    if let Some(app_handle) = app {
+        let bat_name_clone = file_name.clone();
+        let path_clone = clean_path.clone();
+        let tab_id_clone = tab_id.unwrap_or_default().to_string();
+        let planned_png_clone = planned_png.clone();
+        let initial_shot_err = screenshot_error.clone();
+        let auto_save_on = setting.auto_save_image;
+
+        std::thread::spawn(move || {
+            let max_wait = std::time::Duration::from_secs(600);
+            let start = std::time::Instant::now();
+            let mut exited_grace_checks = 0u8;
+
+            while start.elapsed() < max_wait {
+                if meta_file_path.is_file() {
+                    if let Ok(raw) = fs::read_to_string(&meta_file_path) {
+                        let _ = fs::remove_file(&meta_file_path);
+                        let clean_json = raw.trim_start_matches('\u{feff}').trim();
+                        let parsed = serde_json::from_str::<GroupPsMeta>(clean_json).ok();
+                        let exit_code = parsed.as_ref().and_then(|m| m.exit_code);
+                        let success = exit_code == Some(0);
+
+                        let (shot_saved, shot_err) = if let Some(ref png_dest) = planned_png_clone {
+                            let file_non_empty = fs::metadata(png_dest)
+                                .map(|m| m.len() > 0)
+                                .unwrap_or(false);
+                            match parsed {
+                                Some(ref m) => {
+                                    let saved = m.screenshot_saved && file_non_empty;
+                                    let err = m.screenshot_error.clone().or_else(|| {
+                                        if auto_save_on && !saved {
+                                            Some(
+                                                "Screenshot capture did not produce a valid PNG file."
+                                                    .to_string(),
+                                            )
+                                        } else {
+                                            None
+                                        }
+                                    });
+                                    (saved, err)
+                                }
+                                None => (
+                                    file_non_empty,
+                                    if !file_non_empty {
+                                        Some("Screenshot metadata could not be parsed.".to_string())
+                                    } else {
+                                        None
+                                    },
+                                ),
+                            }
+                        } else {
+                            (false, initial_shot_err.clone())
+                        };
+
+                        let _ = app_handle.emit_to(
+                            "main",
+                            "bat-execution-finished",
+                            BatExecutionFinishedEvent {
+                                tab_id: tab_id_clone,
+                                path: path_clone,
+                                bat_name: bat_name_clone,
+                                success,
+                                exit_code,
+                                screenshot_saved: shot_saved,
+                                screenshot_path: planned_png_clone,
+                                screenshot_error: shot_err,
+                            },
+                        );
+                        return;
+                    }
+                }
+
+                if let Ok(Some(exit_status)) = child.try_wait() {
+                    exited_grace_checks += 1;
+                    if exited_grace_checks >= 4 {
+                        let _ = fs::remove_file(&meta_file_path);
+                        let shot_err = if planned_png_clone.is_some() {
+                            Some("PowerShell runner closed before batch completion.".to_string())
+                        } else {
+                            initial_shot_err
+                        };
+                        let _ = app_handle.emit_to(
+                            "main",
+                            "bat-execution-finished",
+                            BatExecutionFinishedEvent {
+                                tab_id: tab_id_clone,
+                                path: path_clone,
+                                bat_name: bat_name_clone,
+                                success: exit_status.success(),
+                                exit_code: exit_status.code(),
+                                screenshot_saved: false,
+                                screenshot_path: planned_png_clone,
+                                screenshot_error: shot_err,
+                            },
+                        );
+                        return;
+                    }
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+
+            let _ = fs::remove_file(&meta_file_path);
+        });
     }
 
-    #[cfg(windows)]
-    {
-        const CREATE_NEW_CONSOLE: u32 = 0x00000010;
-        Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NoExit",
-                "-STA",
-                "-EncodedCommand",
-                &encoded,
-            ])
-            .current_dir(parent)
-            .creation_flags(CREATE_NEW_CONSOLE)
-            .spawn()
-            .map_err(|e| format!("Failed to launch PowerShell window: {}", e))?;
-    }
-
-    #[cfg(not(windows))]
-    {
-        Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NoExit",
-                "-STA",
-                "-EncodedCommand",
-                &encoded,
-            ])
-            .current_dir(parent)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
-
-    Ok(())
+    Ok(BatLaunchResult {
+        launched: true,
+        screenshot_path: planned_png,
+        screenshot_error,
+    })
 }
 
-/// Execute a single `.bat` script sequentially and capture decoded stdout/stderr/exit status (for Group Run).
-pub fn execute_bat_group_step(path: &str) -> BatGroupStepResult {
-    let start = std::time::Instant::now();
-    let clean_path = path.trim().trim_matches('"').replace('/', "\\");
-    let p = Path::new(&clean_path);
-    let name = p
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| clean_path.clone());
-
-    if !p.is_file() {
-        return BatGroupStepResult {
-            path: clean_path.clone(),
-            name,
-            success: false,
-            exit_code: None,
-            duration_ms: start.elapsed().as_millis() as u64,
-            stdout: String::new(),
-            stderr: String::new(),
-            error_message: Some(format!("File does not exist: {}", clean_path)),
-        };
-    }
-
-    let parent = p.parent().unwrap_or(p);
-
+fn run_hidden_bat_cmd(
+    clean_path: &str,
+    name: &str,
+    parent: &Path,
+    start: std::time::Instant,
+    screenshot_path: Option<String>,
+    screenshot_error: Option<String>,
+) -> BatGroupStepResult {
     #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     let mut cmd = Command::new("cmd.exe");
-    cmd.args(["/c", &name]);
+    cmd.args(["/c", name]);
     cmd.current_dir(parent);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
@@ -2254,27 +3090,247 @@ pub fn execute_bat_group_step(path: &str) -> BatGroupStepResult {
             };
 
             BatGroupStepResult {
-                path: clean_path,
-                name,
+                path: clean_path.to_string(),
+                name: name.to_string(),
                 success,
                 exit_code,
                 duration_ms: start.elapsed().as_millis() as u64,
                 stdout,
                 stderr,
                 error_message,
+                screenshot_path,
+                screenshot_saved: false,
+                screenshot_error,
             }
         }
         Err(e) => {
             let err_msg = format!("Failed to execute '{}': {}", name, e);
             BatGroupStepResult {
-                path: clean_path,
-                name,
+                path: clean_path.to_string(),
+                name: name.to_string(),
                 success: false,
                 exit_code: None,
                 duration_ms: start.elapsed().as_millis() as u64,
                 stdout: String::new(),
                 stderr: String::new(),
                 error_message: Some(err_msg),
+                screenshot_path,
+                screenshot_saved: false,
+                screenshot_error,
+            }
+        }
+    }
+}
+
+/// Execute a single `.bat` script sequentially and capture stdout/stderr/exit status (plus Auto Save Image if enabled).
+pub fn execute_bat_group_step(
+    path: &str,
+    project_path: Option<&str>,
+    monitor_anchor: Option<(i32, i32)>,
+) -> BatGroupStepResult {
+    let setting = crate::modules::app_config::load_user_setting();
+    execute_bat_group_step_with_setting_on_monitor(path, project_path, &setting, monitor_anchor)
+}
+
+/// Core sequential `.bat` step executor parameterized by `UserSetting` for clean testability.
+pub fn execute_bat_group_step_with_setting(
+    path: &str,
+    project_path: Option<&str>,
+    setting: &crate::modules::app_config::UserSetting,
+) -> BatGroupStepResult {
+    execute_bat_group_step_with_setting_on_monitor(path, project_path, setting, None)
+}
+
+/// Core sequential `.bat` step executor with optional multi-monitor anchor coordinate.
+pub fn execute_bat_group_step_with_setting_on_monitor(
+    path: &str,
+    project_path: Option<&str>,
+    setting: &crate::modules::app_config::UserSetting,
+    monitor_anchor: Option<(i32, i32)>,
+) -> BatGroupStepResult {
+    let start = std::time::Instant::now();
+    let clean_path = path.trim().trim_matches('"').replace('/', "\\");
+    let p = Path::new(&clean_path);
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| clean_path.clone());
+
+    if !p.is_file() {
+        return BatGroupStepResult {
+            path: clean_path.clone(),
+            name,
+            success: false,
+            exit_code: None,
+            duration_ms: start.elapsed().as_millis() as u64,
+            stdout: String::new(),
+            stderr: String::new(),
+            error_message: Some(format!("File does not exist: {}", clean_path)),
+            screenshot_path: None,
+            screenshot_saved: false,
+            screenshot_error: None,
+        };
+    }
+
+    let parent = p.parent().unwrap_or(p);
+
+    if !setting.auto_save_image || cfg!(not(windows)) {
+        return run_hidden_bat_cmd(&clean_path, &name, parent, start, None, None);
+    }
+
+    #[cfg(windows)]
+    {
+        let target_png = crate::modules::app_config::resolve_screenshot_output_path(
+            setting,
+            project_path,
+            &clean_path,
+        );
+        let target_png_str = target_png.to_string_lossy().replace('/', "\\");
+        let png_parent = target_png.parent().unwrap_or_else(|| Path::new("."));
+
+        if let Err(dir_err) = crate::modules::app_config::validate_writable_directory(png_parent) {
+            return run_hidden_bat_cmd(
+                &clean_path,
+                &name,
+                parent,
+                start,
+                Some(target_png_str),
+                Some(dir_err),
+            );
+        }
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let temp_dir = std::env::temp_dir();
+        let out_file = temp_dir.join(format!("bh_grp_out_{}_{}.txt", std::process::id(), nanos));
+        let meta_file = temp_dir.join(format!("bh_grp_meta_{}_{}.json", std::process::id(), nanos));
+
+        let parent_str = parent.to_string_lossy().to_string();
+        let out_str = out_file.to_string_lossy().to_string();
+        let meta_str = meta_file.to_string_lossy().to_string();
+
+        let script = build_powershell_group_step_script_on_monitor(
+            &parent_str,
+            &name,
+            setting,
+            &target_png_str,
+            &out_str,
+            &meta_str,
+            monitor_anchor,
+        );
+        let ps1_path = allocate_temp_ps1_path("bh_grp_run");
+        if let Err(ps_err) = write_ps1_with_bom(&ps1_path, &script) {
+            return run_hidden_bat_cmd(
+                &clean_path,
+                &name,
+                parent,
+                start,
+                Some(target_png_str),
+                Some(ps_err),
+            );
+        }
+        let ps1_str = ps1_path.to_string_lossy().to_string();
+
+        let child_res = spawn_conhost_powershell(
+            parent,
+            &[
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-STA",
+                "-File",
+                &ps1_str,
+            ],
+        );
+
+        match child_res {
+            Ok(mut child) => {
+                let wait_res = child.wait();
+                let stdout = fs::read_to_string(&out_file)
+                    .unwrap_or_default()
+                    .trim_start_matches('\u{feff}')
+                    .to_string();
+                let meta_raw = fs::read_to_string(&meta_file)
+                    .unwrap_or_default()
+                    .trim_start_matches('\u{feff}')
+                    .to_string();
+                let _ = fs::remove_file(&ps1_path);
+                let _ = fs::remove_file(&out_file);
+                let _ = fs::remove_file(&meta_file);
+
+                let meta = serde_json::from_str::<GroupPsMeta>(meta_raw.trim()).ok();
+                let fallback_exit = wait_res.ok().and_then(|s| s.code());
+                let exit_code = meta.as_ref().and_then(|m| m.exit_code).or(fallback_exit);
+                let success = exit_code == Some(0);
+                let error_message = if success {
+                    None
+                } else {
+                    Some(format!(
+                        "Exited with code {}",
+                        exit_code
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| "unknown".to_string())
+                    ))
+                };
+
+                let file_non_empty = fs::metadata(&target_png)
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false);
+                let (shot_saved, shot_err) = match meta {
+                    Some(m) => (
+                        m.screenshot_saved && file_non_empty,
+                        m.screenshot_error.or_else(|| {
+                            if m.screenshot_saved && !file_non_empty {
+                                Some(
+                                    "Screenshot PNG file was missing or empty after execution."
+                                        .to_string(),
+                                )
+                            } else {
+                                None
+                            }
+                        }),
+                    ),
+                    None => (
+                        file_non_empty,
+                        if file_non_empty {
+                            None
+                        } else {
+                            Some("Screenshot capture did not complete cleanly.".to_string())
+                        },
+                    ),
+                };
+
+                BatGroupStepResult {
+                    path: clean_path,
+                    name,
+                    success,
+                    exit_code,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    stdout,
+                    stderr: String::new(),
+                    error_message,
+                    screenshot_path: Some(target_png_str),
+                    screenshot_saved: shot_saved,
+                    screenshot_error: shot_err,
+                }
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&ps1_path);
+                let _ = fs::remove_file(&out_file);
+                let _ = fs::remove_file(&meta_file);
+                run_hidden_bat_cmd(
+                    &clean_path,
+                    &name,
+                    parent,
+                    start,
+                    Some(target_png_str),
+                    Some(format!(
+                        "Failed to launch PowerShell screenshot runner: {}",
+                        e
+                    )),
+                )
             }
         }
     }

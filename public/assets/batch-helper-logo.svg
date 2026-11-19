@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 184 26" width="184" height="26" role="img" aria-label="BATCH HELPER">
+  <rect x="0.5" y="0.5" width="183" height="25" rx="2" fill="#0a0a0a" stroke="#991b1b" stroke-width="1"/>
+  <rect x="3" y="3" width="3" height="20" fill="#ef233c"/>
+  <path d="M11 9 L16 13 L11 17" fill="none" stroke="#ef233c" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter"/>
+  <text x="23" y="17.5" fill="#ef233c" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="13.5" font-weight="800" letter-spacing="1.2">BATCH HELPER</text>
+</svg>

@@ -25,14 +25,21 @@ let userSetting = {
   ps_window_width: 1000,
   ps_window_height: 650,
   auto_capture_clipboard: true,
+  auto_save_image: false,
+  screenshot_save_dir: null,
 };
 
+let defaultScreenshotRootDir = '';
 let batSplitLeftPct = 40;
 let batViewerDarkTheme = false;
 let dbPasswordVisible = false;
 let groupRunSteps = [];
 let groupRunSelectedIdx = 0;
 let activeGroupRunLocked = false;
+let runningGroupId = null;
+let addGroupPendingTabId = '';
+let addGroupPendingFiles = [];
+let batListActive = false;
 
 try {
   batViewerDarkTheme = localStorage.getItem('bh_bat_viewer_theme') === 'dark';
@@ -55,7 +62,15 @@ function isModalVisible(modalId) {
 }
 
 function closeAllRegularModals() {
-  const modalIds = ['modal-ant', 'modal-java', 'modal-db', 'modal-settings', 'modal-auto-config'];
+  const modalIds = [
+    'modal-ant',
+    'modal-java',
+    'modal-db',
+    'modal-settings',
+    'modal-auto-config',
+    'modal-add-group',
+    'modal-confirm-clear-log',
+  ];
   modalIds.forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.style.display = 'none';
@@ -72,21 +87,96 @@ function openSingleModal(modalId) {
   if (el) el.style.display = 'flex';
 }
 
+function isAnyModalVisible() {
+  const modalIds = [
+    'alert-modal',
+    'modal-ant',
+    'modal-java',
+    'modal-db',
+    'modal-settings',
+    'modal-auto-config',
+    'modal-add-group',
+    'modal-group-run',
+    'modal-confirm-clear-log',
+  ];
+  return modalIds.some((id) => isModalVisible(id));
+}
+
+function normalizeProjectPathKeyLocal(rawPath) {
+  let cleaned = String(rawPath || '').trim();
+  if (
+    (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+    (cleaned.startsWith("'") && cleaned.endsWith("'"))
+  ) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  if (!cleaned) return '';
+
+  cleaned = cleaned.replace(/\//g, '\\');
+  const isUnc = cleaned.startsWith('\\\\');
+  const body = isUnc ? cleaned.slice(2) : cleaned;
+  const rawParts = body.split('\\');
+  const resolved = [];
+
+  for (let i = 0; i < rawParts.length; i++) {
+    const seg = rawParts[i];
+    if (!seg || seg === '.') continue;
+    if (seg === '..') {
+      const minKeep = !isUnc && resolved.length > 0 && /^[A-Za-z]:$/.test(resolved[0]) ? 1 : 0;
+      if (resolved.length > minKeep) {
+        resolved.pop();
+      }
+      continue;
+    }
+    resolved.push(seg);
+  }
+
+  let joined = (isUnc ? '\\\\' : '') + resolved.join('\\');
+  if (/^[A-Za-z]:$/.test(joined)) {
+    joined += '\\';
+  }
+  return joined.toLowerCase();
+}
+
+async function resolveNormalizedProjectPath(rawPath) {
+  const trimmed = String(rawPath || '').trim().replace(/^["']+|["']+$/g, '');
+  if (!trimmed) {
+    return { display_path: '', key: '' };
+  }
+  try {
+    const res = await invoke('normalize_project_path', { path: trimmed });
+    if (res && typeof res === 'object' && res.key) {
+      return res;
+    }
+  } catch (err) {
+    console.warn('Fallback to local project path normalization:', err);
+  }
+  return {
+    display_path: trimmed,
+    key: normalizeProjectPathKeyLocal(trimmed),
+  };
+}
+
 function createTabState(projectPath = '') {
   tabCounter += 1;
   return {
     id: `tab_${Date.now()}_${tabCounter}`,
     requestSeq: 0,
     projectPath: projectPath || '',
+    projectPathKey: normalizeProjectPathKeyLocal(projectPath),
     buildDir: '',
     targets: [],
     defaultTarget: '',
     selectedTarget: '',
     propertiesFile: null,
     dbInfo: null,
+    groups: [],
+    activeGroupId: null,
     buildStatus: 'READY',
     buildStatusClass: 'badge-gray',
     footerStatusText: 'Ready',
+    footerStatusTime: '',
+    footerStatusKind: 'neutral',
     isBuilding: false,
     isGroupRunning: false,
     cmdPanelOpen: false,
@@ -95,6 +185,8 @@ function createTabState(projectPath = '') {
     batFolder: '',
     batFilter: '',
     batFiles: [],
+    batExecStatus: {},
+    batExecMeta: {},
     selectedBatPath: '',
     selectedBatName: '',
     selectedBatContent: '',
@@ -115,8 +207,12 @@ function resetTabProjectState(tab) {
   tab.selectedTarget = '';
   tab.propertiesFile = null;
   tab.dbInfo = null;
+  tab.groups = [];
+  tab.activeGroupId = null;
   tab.batFolder = '';
   tab.batFiles = [];
+  tab.batExecStatus = {};
+  tab.batExecMeta = {};
   tab.selectedBatPath = '';
   tab.selectedBatName = '';
   tab.selectedBatContent = '';
@@ -134,6 +230,75 @@ function getActiveTab() {
 
 function getTabById(tabId) {
   return projectTabs.find((t) => t.id === tabId) || null;
+}
+
+function getTabProjectKey(tab) {
+  if (!tab) return '';
+  return tab.projectPathKey || normalizeProjectPathKeyLocal(tab.projectPath);
+}
+
+async function openOrSwitchProject(rawPath) {
+  const trimmed = String(rawPath || '').trim().replace(/^["']+|["']+$/g, '');
+  if (!trimmed) {
+    showAlert('Notice', 'Please select or enter a project directory path.', '[!]');
+    return null;
+  }
+
+  const norm = await resolveNormalizedProjectPath(trimmed);
+  const displayPath = norm.display_path || trimmed;
+  const targetKey = norm.key || normalizeProjectPathKeyLocal(displayPath);
+
+  let existingTab = projectTabs.find((t) => getTabProjectKey(t) === targetKey);
+  if (!existingTab && targetKey) {
+    for (const t of projectTabs) {
+      if (t.projectPath && !t.projectPathKey) {
+        const resolvedExisting = await resolveNormalizedProjectPath(t.projectPath);
+        if (resolvedExisting.key) {
+          t.projectPathKey = resolvedExisting.key;
+        }
+        if (getTabProjectKey(t) === targetKey) {
+          existingTab = t;
+          break;
+        }
+      }
+    }
+  }
+
+  if (existingTab) {
+    if (existingTab.id !== activeTabId) {
+      switchToTab(existingTab.id);
+    } else {
+      const inputEl = document.getElementById('project-path-input');
+      if (inputEl) {
+        inputEl.value = existingTab.projectPath || displayPath;
+        inputEl.dataset.tabId = existingTab.id;
+      }
+    }
+    return existingTab;
+  }
+
+  const activeTab = getActiveTab();
+  const canReuseBlankActive = activeTab && !(activeTab.projectPath || '').trim();
+  const targetTab = canReuseBlankActive ? activeTab : addNewProjectTab(displayPath);
+  targetTab.projectPath = displayPath;
+  targetTab.projectPathKey = targetKey;
+
+  if (targetTab.id === activeTabId) {
+    const inputEl = document.getElementById('project-path-input');
+    if (inputEl) {
+      inputEl.value = displayPath;
+      inputEl.dataset.tabId = targetTab.id;
+    }
+  }
+
+  const newSettings = await invoke('add_project_history', { path: displayPath });
+  historyListCache = newSettings.history || [];
+  if (targetTab.id === activeTabId) {
+    updateHistoryDropdown(historyListCache, displayPath);
+  }
+  await scanProjectForTab(targetTab, displayPath);
+  await persistTabsToHistory();
+  return targetTab;
 }
 
 function getTabShortTitle(projectPath) {
@@ -244,15 +409,66 @@ function formatCurrentTimeHHMMSS() {
   return `${hh}:${mm}:${ss}`;
 }
 
-function setTabFooterStatus(tab, text) {
+function formatCurrentDateTime() {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mo = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  return `${yyyy}-${mo}-${dd} ${formatCurrentTimeHHMMSS()}`;
+}
+
+function getBatExecStatus(tab, batPath) {
+  if (!tab || !tab.batExecStatus || !batPath) return '';
+  return tab.batExecStatus[String(batPath).toLowerCase()] || '';
+}
+
+function setBatExecStatus(tab, batPath, status, meta = null) {
+  if (!tab || !batPath) return;
+  if (!tab.batExecStatus) tab.batExecStatus = {};
+  if (!tab.batExecMeta) tab.batExecMeta = {};
+  const key = String(batPath).toLowerCase();
+  if (status) {
+    tab.batExecStatus[key] = status;
+  } else {
+    delete tab.batExecStatus[key];
+  }
+  if (meta) {
+    tab.batExecMeta[key] = meta;
+  }
+}
+
+function renderFooterStatus(tab = getActiveTab()) {
+  const footerStatus = document.getElementById('footer-status-text');
+  if (!footerStatus) return;
+
+  const text = (tab && tab.footerStatusText) || 'Ready';
+  const timeStr = (tab && tab.footerStatusTime) || '';
+  const kind = (tab && tab.footerStatusKind) || 'neutral';
+
+  footerStatus.innerHTML = '';
+
+  const labelSpan = document.createElement('span');
+  labelSpan.className = `footer-status-label${kind === 'ok' ? ' status-ok' : kind === 'err' ? ' status-err' : ''}`;
+  labelSpan.textContent = text;
+  footerStatus.appendChild(labelSpan);
+
+  if (timeStr) {
+    const timeSpan = document.createElement('span');
+    timeSpan.className = 'footer-status-time';
+    timeSpan.textContent = timeStr;
+    footerStatus.appendChild(timeSpan);
+  }
+
+  footerStatus.title = timeStr ? `${text} - ${timeStr}` : text;
+}
+
+function setTabFooterStatus(tab, text, timeStr = '', kind = 'neutral') {
   if (!tab) return;
   tab.footerStatusText = text || 'Ready';
+  tab.footerStatusTime = timeStr || '';
+  tab.footerStatusKind = kind || 'neutral';
   if (tab.id === activeTabId) {
-    const footerStatus = document.getElementById('footer-status-text');
-    if (footerStatus) {
-      footerStatus.textContent = tab.footerStatusText;
-      footerStatus.title = tab.footerStatusText;
-    }
+    renderFooterStatus(tab);
   }
 }
 
@@ -389,14 +605,19 @@ function syncUIToActiveTab() {
     inputBatFilter.value = tab.batFilter || '';
   }
 
-  const footerStatus = document.getElementById('footer-status-text');
-  if (footerStatus) {
-    footerStatus.textContent = tab.footerStatusText || 'Ready';
-    footerStatus.title = tab.footerStatusText || 'Ready';
+  const clearAllBtn = document.getElementById('btn-clear-all-log');
+  if (clearAllBtn) {
+    clearAllBtn.disabled = !(
+      (tab.projectPath && tab.projectPath.trim() !== '') ||
+      (tab.consoleLogs && tab.consoleLogs.length > 0)
+    );
   }
+
+  renderFooterStatus(tab);
 
   updateFooterDbUI(tab);
   updateLogButtonsUI(tab);
+  renderGroupsBar(tab);
   applyBatSplitWidth(batSplitLeftPct);
   applyBatThemeUI();
   applyBatFilterAndRender(tab);
@@ -456,19 +677,42 @@ async function loadSettings() {
     const settings = await invoke('get_settings');
     historyListCache = settings.history || [];
 
-    // Restore saved tabs or fallback to last_project
-    const savedTabs = (settings.open_tabs || []).filter((p) => p && p.trim() !== '');
-    if (savedTabs.length > 0) {
-      savedTabs.forEach((p) => {
-        projectTabs.push(createTabState(p));
-      });
-      const activeIdx = Math.min(
-        settings.active_tab_index || 0,
-        projectTabs.length - 1
+    // Restore saved tabs (deduplicated by canonical normalized project path) or fallback to last_project
+    const rawSavedTabs = Array.isArray(settings.open_tabs) ? settings.open_tabs : [];
+    const targetRawActive = rawSavedTabs[settings.active_tab_index || 0] || '';
+    const nonEmptySaved = rawSavedTabs.filter((p) => p && p.trim() !== '');
+
+    if (nonEmptySaved.length > 0) {
+      const normalizedList = await Promise.all(
+        nonEmptySaved.map((p) => resolveNormalizedProjectPath(p))
       );
-      activeTabId = projectTabs[activeIdx].id;
+      const seenKeys = new Set();
+      normalizedList.forEach((norm) => {
+        const key = norm.key || normalizeProjectPathKeyLocal(norm.display_path);
+        if (key && !seenKeys.has(key)) {
+          seenKeys.add(key);
+          const tab = createTabState(norm.display_path);
+          tab.projectPathKey = key;
+          projectTabs.push(tab);
+        }
+      });
+
+      const activeNorm = targetRawActive
+        ? await resolveNormalizedProjectPath(targetRawActive)
+        : null;
+      const matchedActive =
+        activeNorm && activeNorm.key
+          ? projectTabs.find((t) => getTabProjectKey(t) === activeNorm.key)
+          : null;
+      activeTabId = (matchedActive || projectTabs[0]).id;
+
+      if (projectTabs.length < nonEmptySaved.length) {
+        persistTabsToHistory();
+      }
     } else if (settings.last_project && settings.last_project.trim() !== '') {
-      const tab = createTabState(settings.last_project.trim());
+      const lastNorm = await resolveNormalizedProjectPath(settings.last_project.trim());
+      const tab = createTabState(lastNorm.display_path || settings.last_project.trim());
+      tab.projectPathKey = lastNorm.key || normalizeProjectPathKeyLocal(tab.projectPath);
       projectTabs.push(tab);
       activeTabId = tab.id;
     } else {
@@ -506,22 +750,39 @@ function closeHistoryMenu() {
 }
 
 function updateHistoryDropdown(historyList, selectedProject) {
+  const triggerBtn = document.getElementById('btn-history-dropdown');
   const labelEl = document.getElementById('history-dropdown-label');
   const menuEl = document.getElementById('history-dropdown-menu');
   if (!labelEl || !menuEl) return;
 
   const list = historyList || [];
   if (selectedProject && selectedProject.trim() !== '') {
-    const parts = selectedProject.trim().split(/[\\/]/).filter(Boolean);
-    const shortName = parts.length > 0 ? parts[parts.length - 1] : selectedProject;
-    labelEl.textContent = `${shortName} (${selectedProject})`;
-    labelEl.title = selectedProject;
+    const cleanSelected = selectedProject.trim();
+    const parts = cleanSelected.split(/[\\/]/).filter(Boolean);
+    const shortName = parts.length > 0 ? parts[parts.length - 1] : cleanSelected;
+    labelEl.textContent = `${shortName} (${cleanSelected})`;
+    labelEl.title = cleanSelected;
+    labelEl.dataset.fullPath = cleanSelected;
+    if (triggerBtn) {
+      triggerBtn.title = cleanSelected;
+      triggerBtn.dataset.fullPath = cleanSelected;
+    }
   } else if (list.length === 0) {
     labelEl.textContent = '(No history)';
-    labelEl.title = '';
+    labelEl.title = 'No recent projects';
+    labelEl.dataset.fullPath = '';
+    if (triggerBtn) {
+      triggerBtn.title = 'Select or remove recent projects';
+      triggerBtn.dataset.fullPath = '';
+    }
   } else {
     labelEl.textContent = '-- Select recent project --';
-    labelEl.title = '';
+    labelEl.title = 'Select or remove recent projects';
+    labelEl.dataset.fullPath = '';
+    if (triggerBtn) {
+      triggerBtn.title = 'Select or remove recent projects';
+      triggerBtn.dataset.fullPath = '';
+    }
   }
 
   menuEl.innerHTML = '';
@@ -533,18 +794,21 @@ function updateHistoryDropdown(historyList, selectedProject) {
     return;
   }
 
+  const selectedKey = normalizeProjectPathKeyLocal(selectedProject);
   list.forEach((item) => {
     const row = document.createElement('div');
-    const isActive =
-      selectedProject && item.toLowerCase() === selectedProject.trim().toLowerCase();
+    const isActive = selectedKey !== '' && normalizeProjectPathKeyLocal(item) === selectedKey;
     row.className = `history-item-row${isActive ? ' active' : ''}`;
     row.title = item;
+    row.dataset.fullPath = item;
 
     const textSpan = document.createElement('span');
     textSpan.className = 'history-item-text';
     const parts = item.split(/[\\/]/).filter(Boolean);
     const shortName = parts.length > 0 ? parts[parts.length - 1] : item;
     textSpan.textContent = `${shortName} (${item})`;
+    textSpan.title = item;
+    textSpan.dataset.fullPath = item;
 
     const delBtn = document.createElement('button');
     delBtn.type = 'button';
@@ -567,21 +831,12 @@ function updateHistoryDropdown(historyList, selectedProject) {
 
     row.addEventListener('click', async () => {
       closeHistoryMenu();
-      const tab = getActiveTab() || addNewProjectTab(item);
-      if (tab.id === activeTabId) {
-        const inputEl = document.getElementById('project-path-input');
-        if (inputEl) {
-          inputEl.value = item;
-          inputEl.dataset.tabId = tab.id;
-        }
+      try {
+        await openOrSwitchProject(item);
+      } catch (err) {
+        console.error('Open project from history failed:', err);
+        showAlert('Open Project Error', escapeHtml(String(err)), '[X]');
       }
-      const newSettings = await invoke('add_project_history', { path: item });
-      historyListCache = newSettings.history || [];
-      if (tab.id === activeTabId) {
-        updateHistoryDropdown(historyListCache, item);
-      }
-      await scanProjectForTab(tab, item);
-      await persistTabsToHistory();
     });
 
     row.appendChild(textSpan);
@@ -604,11 +859,16 @@ async function scanProjectForTab(tab, path) {
   const reqSeq = (tab.requestSeq || 0) + 1;
   tab.requestSeq = reqSeq;
 
-  const isSwitchingProject = cleanPath.toLowerCase() !== (tab.projectPath || '').trim().toLowerCase();
+  const incomingKey = normalizeProjectPathKeyLocal(cleanPath);
+  const existingKey = getTabProjectKey(tab);
+  const isSwitchingProject = existingKey !== '' && incomingKey !== existingKey;
   if (isSwitchingProject) {
     resetTabProjectState(tab);
   }
   tab.projectPath = cleanPath;
+  if (!tab.projectPathKey || isSwitchingProject) {
+    tab.projectPathKey = incomingKey;
+  }
   renderTabsBar();
   if (isSwitchingProject && tab.id === activeTabId) {
     syncUIToActiveTab();
@@ -637,8 +897,16 @@ async function scanProjectForTab(tab, path) {
     }
 
     if (!res.build_xml_found || res.ant_targets.length === 0) {
+      const savedBuildDir = tab.buildDir;
       resetTabProjectState(tab);
-      tab.buildDir = res.build_folder_found && res.build_folder_path ? res.build_folder_path : cleanPath;
+      tab.buildDir = savedBuildDir;
+      try {
+        const groups = await invoke('get_project_groups', { projectPath: cleanPath });
+        if (tab.requestSeq !== reqSeq) return;
+        tab.groups = Array.isArray(groups) ? groups : [];
+      } catch (_) {
+        tab.groups = [];
+      }
       setTabFooterStatus(tab, !res.build_xml_found ? 'No build.xml' : 'No targets');
       if (tab.id === activeTabId) {
         syncUIToActiveTab();
@@ -755,9 +1023,10 @@ async function inspectTargetBatFilesForTab(tab, projectPath, target, expectedSeq
   }
 
   try {
-    const [inspection, dbInfo] = await Promise.all([
+    const [inspection, dbInfo, groups] = await Promise.all([
       invoke('inspect_build_target', { projectPath, target }),
       invoke('inspect_database_config', { projectPath, target }).catch(() => null),
+      invoke('get_project_groups', { projectPath }).catch(() => tab.groups || []),
     ]);
     if (
       tab.requestSeq !== reqSeq ||
@@ -769,6 +1038,10 @@ async function inspectTargetBatFilesForTab(tab, projectPath, target, expectedSeq
 
     tab.propertiesFile = inspection.properties_file || null;
     tab.dbInfo = dbInfo;
+    tab.groups = Array.isArray(groups) ? groups : [];
+    if (tab.activeGroupId && !tab.groups.some((g) => g.id === tab.activeGroupId)) {
+      tab.activeGroupId = null;
+    }
     tab.batFolder = inspection.bat_folder || '';
     tab.batchLogName = inspection.batch_log_name || null;
     tab.appLogName = inspection.app_log_name || null;
@@ -807,6 +1080,7 @@ async function inspectTargetBatFilesForTab(tab, projectPath, target, expectedSeq
       }
       updateFooterDbUI(tab);
       updateLogButtonsUI(tab);
+      renderGroupsBar(tab);
       applyBatFilterAndRender(tab);
       renderBatPreview(tab);
     }
@@ -876,10 +1150,18 @@ function applyBatSplitWidth(pct) {
 }
 
 function applyBatThemeUI() {
+  const tableContainer = document.getElementById('bat-table-container');
   const viewer = document.getElementById('bat-preview-content');
+  const groupLogViewer = document.getElementById('group-run-output-log');
   const toggleBtn = document.getElementById('btn-toggle-bat-theme');
+  if (tableContainer) {
+    tableContainer.classList.toggle('theme-dark', !!batViewerDarkTheme);
+  }
   if (viewer) {
     viewer.classList.toggle('theme-dark', !!batViewerDarkTheme);
+  }
+  if (groupLogViewer) {
+    groupLogViewer.classList.toggle('theme-dark', !!batViewerDarkTheme);
   }
   if (toggleBtn) {
     toggleBtn.textContent = batViewerDarkTheme ? 'Light' : 'Dark';
@@ -1237,15 +1519,119 @@ function renderBatPreview(tab = getActiveTab()) {
   if (openFileBtn) openFileBtn.disabled = false;
 }
 
+function filterBatFilesByPrefixes(files, rawQuery) {
+  const list = files || [];
+  const trimmed = String(rawQuery || '').trim();
+  if (!trimmed) return list;
+
+  const tokens = [];
+  const tokenSet = new Set();
+  trimmed.split(',').forEach((part) => {
+    const clean = part.trim().toLowerCase();
+    if (clean && !tokenSet.has(clean)) {
+      tokenSet.add(clean);
+      tokens.push(clean);
+    }
+  });
+
+  if (tokens.length === 0) return list;
+
+  const matched = [];
+  const seenPaths = new Set();
+  for (let i = 0; i < list.length; i++) {
+    const file = list[i];
+    const nameLower = String(file.name || '').toLowerCase();
+    let isMatch = false;
+    for (let t = 0; t < tokens.length; t++) {
+      if (nameLower.startsWith(tokens[t])) {
+        isMatch = true;
+        break;
+      }
+    }
+    if (isMatch) {
+      const pathKey = String(file.path || file.name || i).toLowerCase();
+      if (!seenPaths.has(pathKey)) {
+        seenPaths.add(pathKey);
+        matched.push(file);
+      }
+    }
+  }
+
+  return matched;
+}
+
+function getFileBasename(filePath) {
+  const parts = String(filePath || '').trim().split(/[\\/]/).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : String(filePath || '');
+}
+
+function resolveGroupOrderedFiles(tab, group) {
+  if (!tab || !group || !Array.isArray(group.files)) return [];
+  const allFiles = tab.batFiles || [];
+  const byPath = new Map();
+  const byName = new Map();
+  allFiles.forEach((f) => {
+    byPath.set(String(f.path || '').toLowerCase(), f);
+    if (!byName.has(String(f.name || '').toLowerCase())) {
+      byName.set(String(f.name || '').toLowerCase(), f);
+    }
+  });
+
+  const resolved = [];
+  const seen = new Set();
+  group.files.forEach((savedPath) => {
+    const cleanPath = String(savedPath || '').trim();
+    if (!cleanPath) return;
+    const key = cleanPath.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    const exact = byPath.get(key);
+    if (exact) {
+      resolved.push(exact);
+      return;
+    }
+
+    const baseName = getFileBasename(cleanPath);
+    const matchedByName = byName.get(baseName.toLowerCase());
+    if (matchedByName) {
+      resolved.push(matchedByName);
+      return;
+    }
+
+    resolved.push({
+      name: baseName,
+      path: cleanPath,
+      size_bytes: 0,
+      modified_time: 'Missing',
+      isMissing: true,
+    });
+  });
+
+  return resolved;
+}
+
+function getBaseBatFilesForTab(tab = getActiveTab()) {
+  if (!tab) return [];
+  if (!tab.activeGroupId) {
+    return tab.batFiles || [];
+  }
+  const activeGroup = (tab.groups || []).find((g) => g.id === tab.activeGroupId);
+  if (!activeGroup) {
+    return tab.batFiles || [];
+  }
+  return resolveGroupOrderedFiles(tab, activeGroup);
+}
+
 function getFilteredBatFiles(tab = getActiveTab()) {
   if (!tab) return [];
   const filterInput = document.getElementById('input-bat-filter');
-  const query =
+  const rawQuery =
     tab.id === activeTabId && filterInput
-      ? filterInput.value.trim().toLowerCase()
-      : (tab.batFilter || '').trim().toLowerCase();
-  const allFiles = tab.batFiles || [];
-  return query ? allFiles.filter((f) => f.name.toLowerCase().includes(query)) : allFiles;
+      ? filterInput.value
+      : tab.batFilter || '';
+  const baseFiles = getBaseBatFilesForTab(tab);
+  return filterBatFilesByPrefixes(baseFiles, rawQuery);
 }
 
 function getSelectedFilesInDisplayOrder(tab = getActiveTab()) {
@@ -1255,15 +1641,13 @@ function getSelectedFilesInDisplayOrder(tab = getActiveTab()) {
     selectedSet.add(tab.selectedBatPath.toLowerCase());
   }
   const filtered = getFilteredBatFiles(tab);
-  const inFiltered = filtered.filter((f) => selectedSet.has(f.path.toLowerCase()));
-  if (inFiltered.length > 0) return inFiltered;
-  return (tab.batFiles || []).filter((f) => selectedSet.has(f.path.toLowerCase()));
+  return filtered.filter((f) => f && !f.isMissing && selectedSet.has(f.path.toLowerCase()));
 }
 
 function updateSelectedCountBadge(tab = getActiveTab()) {
   const badge = document.getElementById('meta-bat-selected');
   if (!badge) return;
-  const count = tab && tab.selectedBatPaths ? tab.selectedBatPaths.length : 0;
+  const count = tab ? getSelectedFilesInDisplayOrder(tab).length : 0;
   if (count > 1) {
     badge.textContent = `${count} sel`;
     badge.style.display = 'inline-block';
@@ -1277,6 +1661,241 @@ function closeBatContextMenu() {
   if (menu) menu.style.display = 'none';
 }
 
+function closeGroupContextMenu() {
+  const menu = document.getElementById('group-context-menu');
+  if (menu) menu.style.display = 'none';
+}
+
+function positionPopupMenu(menu, x, y) {
+  menu.style.display = 'block';
+  const menuW = menu.offsetWidth || 180;
+  const menuH = menu.offsetHeight || 40;
+  const clampedX = Math.max(4, Math.min(x, window.innerWidth - menuW - 6));
+  const clampedY = Math.max(4, Math.min(y, window.innerHeight - menuH - 6));
+  menu.style.left = `${clampedX}px`;
+  menu.style.top = `${clampedY}px`;
+}
+
+function renderGroupsBar(tab = getActiveTab()) {
+  const barEl = document.getElementById('bat-groups-bar');
+  const listEl = document.getElementById('bat-groups-list');
+  if (!barEl || !listEl) return;
+
+  const groups = (tab && Array.isArray(tab.groups) && tab.groups) || [];
+  if (groups.length === 0) {
+    barEl.style.display = 'none';
+    listEl.innerHTML = '';
+    return;
+  }
+
+  barEl.style.display = 'flex';
+  listEl.innerHTML = '';
+
+  const totalCount = (tab.batFiles || []).length;
+  const allChip = document.createElement('button');
+  allChip.type = 'button';
+  allChip.className = `win95-btn group-chip${!tab.activeGroupId ? ' active' : ''}`;
+  allChip.title = 'Return to normal full BAT file list';
+  allChip.innerHTML = `<span class="group-chip-name">All</span><span class="group-chip-count">(${totalCount})</span>`;
+  allChip.addEventListener('click', () => {
+    closeBatContextMenu();
+    closeGroupContextMenu();
+    tab.activeGroupId = null;
+    renderGroupsBar(tab);
+    applyBatFilterAndRender(tab);
+  });
+  listEl.appendChild(allChip);
+
+  groups.forEach((group) => {
+    const isActive = tab.activeGroupId === group.id;
+    const chip = document.createElement('div');
+    chip.setAttribute('role', 'button');
+    chip.tabIndex = 0;
+    chip.className = `win95-btn group-chip${isActive ? ' active' : ''}`;
+    chip.title = `${group.name} (${group.files.length} file(s)) | Click to filter | Right-click for Run All`;
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'group-chip-name';
+    nameSpan.textContent = group.name;
+
+    const countSpan = document.createElement('span');
+    countSpan.className = 'group-chip-count';
+    countSpan.textContent = `(${group.files.length})`;
+
+    const delBtn = document.createElement('span');
+    delBtn.setAttribute('role', 'button');
+    delBtn.tabIndex = 0;
+    delBtn.className = 'group-chip-del';
+    delBtn.textContent = 'x';
+    delBtn.title = `Delete group "${group.name}"`;
+
+    const handleDeleteGroup = async (e) => {
+      e.stopPropagation();
+      closeGroupContextMenu();
+      try {
+        const updated = await invoke('delete_batch_group', {
+          projectPath: tab.projectPath,
+          groupId: group.id,
+        });
+        tab.groups = Array.isArray(updated) ? updated : [];
+        if (tab.activeGroupId === group.id) {
+          tab.activeGroupId = null;
+        }
+        renderGroupsBar(tab);
+        applyBatFilterAndRender(tab);
+      } catch (err) {
+        showAlert('Delete Group Error', escapeHtml(String(err)), '[X]');
+      }
+    };
+
+    delBtn.addEventListener('click', handleDeleteGroup);
+    delBtn.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        handleDeleteGroup(e);
+      }
+    });
+
+    const toggleGroupSelection = () => {
+      closeBatContextMenu();
+      closeGroupContextMenu();
+      tab.activeGroupId = tab.activeGroupId === group.id ? null : group.id;
+      renderGroupsBar(tab);
+      applyBatFilterAndRender(tab);
+    };
+
+    chip.addEventListener('click', toggleGroupSelection);
+    chip.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeBatContextMenu();
+      showGroupContextMenu(e.clientX, e.clientY, tab, group);
+    });
+    chip.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggleGroupSelection();
+      } else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+        e.preventDefault();
+        const rect = chip.getBoundingClientRect();
+        showGroupContextMenu(rect.left + 8, rect.bottom + 2, tab, group);
+      }
+    });
+
+    chip.appendChild(nameSpan);
+    chip.appendChild(countSpan);
+    chip.appendChild(delBtn);
+    listEl.appendChild(chip);
+  });
+}
+
+function showGroupContextMenu(x, y, tab, group) {
+  const menu = document.getElementById('group-context-menu');
+  if (!menu || !tab || !group) return;
+
+  menu.innerHTML = '';
+  const isBusy = activeGroupRunLocked || tab.isGroupRunning || runningGroupId === group.id;
+  const item = document.createElement('div');
+  item.className = `win95-context-item${isBusy ? ' disabled' : ''}`;
+  item.style.fontWeight = 'bold';
+  item.textContent = isBusy
+    ? `Run All (Running...)`
+    : `Run All (${group.files.length})`;
+
+  if (!isBusy) {
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeGroupContextMenu();
+      runSavedBatchGroup(tab, group);
+    });
+  }
+
+  menu.appendChild(item);
+  positionPopupMenu(menu, x, y);
+}
+
+function openAddGroupModal(tab, selectedFiles) {
+  if (!tab || !tab.projectPath) {
+    showAlert('No Project Selected', 'Please select a project directory before creating a group.', '[!]');
+    return;
+  }
+
+  const deduped = [];
+  const seen = new Set();
+  (selectedFiles || []).forEach((f) => {
+    if (!f || !f.path || f.isMissing) return;
+    const key = f.path.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      deduped.push(f);
+    }
+  });
+
+  if (deduped.length === 0) {
+    showAlert('No Files Selected', 'Please select one or more valid .bat files first.', '[!]');
+    return;
+  }
+
+  addGroupPendingTabId = tab.id;
+  addGroupPendingFiles = deduped;
+
+  const summaryEl = document.getElementById('add-group-files-summary');
+  const listEl = document.getElementById('add-group-files-list');
+  const radioNew = document.getElementById('add-group-mode-new');
+  const radioExisting = document.getElementById('add-group-mode-existing');
+  const newNameEl = document.getElementById('add-group-new-name');
+  const existingSelEl = document.getElementById('add-group-existing-select');
+  const errorEl = document.getElementById('add-group-error');
+
+  if (summaryEl) {
+    summaryEl.textContent = `Selected BAT Files (${deduped.length})`;
+  }
+  if (listEl) {
+    listEl.innerHTML = deduped
+      .map((f, idx) => `<div>${idx + 1}. ${escapeHtml(f.name)}</div>`)
+      .join('');
+  }
+  if (errorEl) {
+    errorEl.style.display = 'none';
+    errorEl.textContent = '';
+  }
+
+  const groups = tab.groups || [];
+  if (existingSelEl) {
+    existingSelEl.innerHTML = '';
+    if (groups.length === 0) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = '-- No existing groups --';
+      existingSelEl.appendChild(opt);
+    } else {
+      groups.forEach((g) => {
+        const opt = document.createElement('option');
+        opt.value = g.id;
+        opt.textContent = `${g.name} (${g.files.length} files)`;
+        if (tab.activeGroupId && tab.activeGroupId === g.id) {
+          opt.selected = true;
+        }
+        existingSelEl.appendChild(opt);
+      });
+    }
+    existingSelEl.disabled = groups.length === 0;
+  }
+
+  if (radioNew && radioExisting) {
+    radioNew.checked = true;
+    radioExisting.disabled = groups.length === 0;
+  }
+  if (newNameEl) {
+    newNameEl.value = '';
+  }
+
+  openSingleModal('modal-add-group');
+  if (newNameEl) {
+    setTimeout(() => newNameEl.focus(), 20);
+  }
+}
+
 function showBatContextMenu(x, y, tab) {
   const menu = document.getElementById('bat-context-menu');
   if (!menu || !tab) return;
@@ -1284,59 +1903,79 @@ function showBatContextMenu(x, y, tab) {
   const selectedFiles = getSelectedFilesInDisplayOrder(tab);
   if (selectedFiles.length === 0) return;
 
+  closeGroupContextMenu();
   menu.innerHTML = '';
 
-  const addItem = (label, onClick, disabled = false, bold = false) => {
-    const div = document.createElement('div');
-    div.className = `win95-context-item${disabled ? ' disabled' : ''}`;
-    if (bold) div.style.fontWeight = 'bold';
-    div.textContent = label;
-    if (!disabled) {
-      div.addEventListener('click', (e) => {
+  if (selectedFiles.length >= 2) {
+    const isBusy = activeGroupRunLocked || tab.isGroupRunning;
+    const runAllItem = document.createElement('div');
+    runAllItem.className = `win95-context-item${isBusy ? ' disabled' : ''}`;
+    runAllItem.style.fontWeight = 'bold';
+    runAllItem.textContent = isBusy
+      ? 'Run All (Running...)'
+      : `Run All (${selectedFiles.length})`;
+    if (!isBusy) {
+      runAllItem.addEventListener('click', (e) => {
         e.stopPropagation();
         closeBatContextMenu();
-        onClick();
+        runBatGroupSequential(tab, selectedFiles, null);
       });
     }
-    menu.appendChild(div);
-  };
+    menu.appendChild(runAllItem);
 
-  const addSep = () => {
     const sep = document.createElement('div');
     sep.className = 'win95-context-sep';
     menu.appendChild(sep);
-  };
-
-  if (selectedFiles.length > 1) {
-    addItem(
-      `Run Group (${selectedFiles.length} files)`,
-      () => runBatGroupSequential(tab, selectedFiles),
-      activeGroupRunLocked || tab.isGroupRunning,
-      true
-    );
-    addSep();
-    addItem('Open File (Text Editor)', () => {
-      if (tab.selectedBatPath) {
-        openBatInTextEditor(tab.selectedBatPath);
-      }
-    });
-    addItem('Clear Multi-Selection', () => {
-      tab.selectedBatPaths = tab.selectedBatPath ? [tab.selectedBatPath] : [];
-      applyBatFilterAndRender(tab);
-    });
-  } else {
-    const single = selectedFiles[0];
-    addItem(`Run (${single.name})`, () => runBatScript(single.path), false, true);
-    addItem('Open File (Text Editor)', () => openBatInTextEditor(single.path));
   }
 
-  menu.style.display = 'block';
-  const menuW = menu.offsetWidth || 190;
-  const menuH = menu.offsetHeight || 90;
-  const clampedX = Math.max(4, Math.min(x, window.innerWidth - menuW - 6));
-  const clampedY = Math.max(4, Math.min(y, window.innerHeight - menuH - 6));
-  menu.style.left = `${clampedX}px`;
-  menu.style.top = `${clampedY}px`;
+  const addGroupItem = document.createElement('div');
+  addGroupItem.className = 'win95-context-item';
+  addGroupItem.style.fontWeight = 'bold';
+  addGroupItem.textContent = 'ADD GROUP';
+  addGroupItem.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeBatContextMenu();
+    openAddGroupModal(tab, selectedFiles);
+  });
+
+  menu.appendChild(addGroupItem);
+  positionPopupMenu(menu, x, y);
+}
+
+function selectAllVisibleBatFiles(tab = getActiveTab()) {
+  if (!tab) return false;
+  const displayed = getFilteredBatFiles(tab);
+  const validPairs = [];
+  displayed.forEach((f, idx) => {
+    if (f && f.path && !f.isMissing) {
+      validPairs.push({ file: f, idx });
+    }
+  });
+  if (validPairs.length === 0) return false;
+
+  tab.selectedBatPaths = validPairs.map((p) => p.file.path);
+  tab.lastSelectedBatIndex = validPairs[0].idx;
+
+  const validSet = new Set(tab.selectedBatPaths.map((p) => p.toLowerCase()));
+  const needPreviewLoad =
+    !tab.selectedBatPath || !validSet.has(tab.selectedBatPath.toLowerCase());
+
+  if (needPreviewLoad) {
+    loadBatFileContentForTab(tab, validPairs[0].file);
+  } else if (tab.id === activeTabId) {
+    applyBatFilterAndRender(tab);
+  } else {
+    updateSelectedCountBadge(tab);
+  }
+
+  batListActive = true;
+  const container = document.getElementById('bat-table-container');
+  if (container) {
+    try {
+      container.focus({ preventScroll: true });
+    } catch (_) {}
+  }
+  return true;
 }
 
 function applyBatFilterAndRender(tab = getActiveTab()) {
@@ -1347,15 +1986,16 @@ function applyBatFilterAndRender(tab = getActiveTab()) {
     tab.batFilter = filterInput.value;
   }
 
-  const allFiles = tab.batFiles || [];
+  const baseFiles = getBaseBatFilesForTab(tab);
   const filtered = getFilteredBatFiles(tab);
   updateSelectedCountBadge(tab);
-  renderBatFilesTable(filtered, allFiles.length, tab);
+  renderBatFilesTable(filtered, baseFiles.length, tab);
 }
 
 function handleBatRowSelection(e, tab, file, idx, displayedFiles) {
   if (!tab || !file) return;
 
+  batListActive = true;
   const filePathLower = file.path.toLowerCase();
   const isShift = !!e.shiftKey;
   const isCtrl = !!(e.ctrlKey || e.metaKey);
@@ -1366,7 +2006,10 @@ function handleBatRowSelection(e, tab, file, idx, displayedFiles) {
     }
     const start = Math.min(tab.lastSelectedBatIndex, idx);
     const end = Math.max(tab.lastSelectedBatIndex, idx);
-    const rangePaths = displayedFiles.slice(start, end + 1).map((f) => f.path);
+    const rangePaths = displayedFiles
+      .slice(start, end + 1)
+      .filter((f) => f && f.path && !f.isMissing)
+      .map((f) => f.path);
 
     if (isCtrl) {
       const merged = new Set((tab.selectedBatPaths || []).map((p) => p.toLowerCase()));
@@ -1382,21 +2025,39 @@ function handleBatRowSelection(e, tab, file, idx, displayedFiles) {
       tab.selectedBatPaths = rangePaths;
     }
   } else if (isCtrl) {
-    const existing = tab.selectedBatPaths || [];
-    const foundIdx = existing.findIndex((p) => p.toLowerCase() === filePathLower);
-    if (foundIdx >= 0) {
-      tab.selectedBatPaths = existing.filter((_, i) => i !== foundIdx);
-    } else {
-      tab.selectedBatPaths = [...existing, file.path];
+    if (!file.isMissing) {
+      const existing = tab.selectedBatPaths || [];
+      const foundIdx = existing.findIndex((p) => p.toLowerCase() === filePathLower);
+      if (foundIdx >= 0) {
+        tab.selectedBatPaths = existing.filter((_, i) => i !== foundIdx);
+      } else {
+        tab.selectedBatPaths = [...existing, file.path];
+      }
+      tab.lastSelectedBatIndex = idx;
     }
-    tab.lastSelectedBatIndex = idx;
   } else {
-    tab.selectedBatPaths = [file.path];
+    tab.selectedBatPaths = file.isMissing ? [] : [file.path];
     tab.lastSelectedBatIndex = idx;
   }
 
   updateSelectedCountBadge(tab);
+  if (file.isMissing) {
+    tab.selectedBatPath = file.path;
+    tab.selectedBatName = file.name;
+    tab.selectedBatContent = `[Missing File] Referenced .bat file was not found on disk:\n${file.path}`;
+    if (tab.id === activeTabId) {
+      applyBatFilterAndRender(tab);
+      renderBatPreview(tab);
+    }
+    return;
+  }
   loadBatFileContentForTab(tab, file);
+  const container = document.getElementById('bat-table-container');
+  if (container) {
+    try {
+      container.focus({ preventScroll: true });
+    } catch (_) {}
+  }
 }
 
 function renderBatFilesTable(files, totalCount, tab) {
@@ -1407,7 +2068,7 @@ function renderBatFilesTable(files, totalCount, tab) {
     tbody.innerHTML = `
       <tr>
         <td colspan="4" class="empty-row">
-          No .bat files found in target directory. Run Build or browse a custom folder.
+          ${tab && tab.activeGroupId ? 'This group has no .bat files.' : 'No .bat files found in target directory. Run Build or browse a custom folder.'}
         </td>
       </tr>
     `;
@@ -1446,35 +2107,94 @@ function renderBatFilesTable(files, totalCount, tab) {
     const tr = document.createElement('tr');
     const isSelected = selectedSet.has(file.path.toLowerCase());
     if (isSelected) {
-      tr.className = 'selected-row';
+      tr.classList.add('selected-row');
     }
-    tr.title = `Click to preview | Ctrl/Shift+Click multi-select | Right-click menu | Dbl-click Run: ${file.path}`;
+    if (file.isMissing) {
+      tr.classList.add('bat-row-missing');
+    }
+
+    const execStatus = getBatExecStatus(tab, file.path);
+    const execMeta =
+      tab && tab.batExecMeta ? tab.batExecMeta[String(file.path || '').toLowerCase()] : null;
+    let statusTagHtml = '';
+    let statusNote = '';
+    if (execStatus === 'success') {
+      tr.classList.add('bat-status-success');
+      statusTagHtml = '<span class="bat-status-tag bat-tag-success">OK</span>';
+      statusNote =
+        execMeta && execMeta.exit_code !== null && execMeta.exit_code !== undefined
+          ? ` | Last status: SUCCESS (Exit ${execMeta.exit_code})`
+          : ' | Last status: SUCCESS';
+    } else if (execStatus === 'failed') {
+      tr.classList.add('bat-status-failed');
+      statusTagHtml = '<span class="bat-status-tag bat-tag-failed">FAIL</span>';
+      statusNote =
+        execMeta && execMeta.exit_code !== null && execMeta.exit_code !== undefined
+          ? ` | Last status: FAILED (Exit ${execMeta.exit_code})`
+          : ' | Last status: FAILED';
+    } else if (execStatus === 'pending') {
+      tr.classList.add('bat-status-pending');
+      statusTagHtml = '<span class="bat-status-tag bat-tag-pending">WAIT</span>';
+      statusNote = ' | Status: WAITING / PENDING';
+    } else if (execStatus === 'running') {
+      tr.classList.add('bat-status-running');
+      statusTagHtml = '<span class="bat-status-tag bat-tag-running">RUN</span>';
+      statusNote = ' | Status: RUNNING';
+    }
+
+    tr.title = file.isMissing
+      ? `Missing file: ${file.path}${statusNote}`
+      : `Click to preview | Ctrl/Shift+Click or Ctrl+A multi-select | Right-click ADD GROUP / Run All | Dbl-click Run: ${file.path}${statusNote}`;
 
     tr.innerHTML = `
       <td style="text-align: center;">${idx + 1}</td>
-      <td title="${escapeHtml(file.name)}">
+      <td title="${escapeHtml((file.path || file.name) + statusNote)}">
         <div class="file-name-cell">
-          <b>${escapeHtml(file.name)}</b>
+          <span class="file-name-text"><b>${escapeHtml(file.name)}</b></span>${statusTagHtml}${file.isMissing ? ' <span class="badge badge-red">MISSING</span>' : ''}
         </div>
       </td>
       <td style="text-align: center; font-size: 10px;">${escapeHtml(file.modified_time)}</td>
       <td style="text-align: center;">
-        <button class="win95-btn btn-bat-run" data-path="${escapeHtml(file.path)}">
-          Run
+        <button class="win95-btn btn-bat-run" data-path="${escapeHtml(file.path)}"${file.isMissing ? ' disabled' : ''}>
+          ${execStatus === 'running' ? 'Run...' : 'Run'}
         </button>
       </td>
     `;
 
+    tr.tabIndex = 0;
     tr.addEventListener('click', (e) => {
       closeBatContextMenu();
+      closeGroupContextMenu();
       const activeTab = getActiveTab();
       if (activeTab) {
         handleBatRowSelection(e, activeTab, file, idx, files);
       }
     });
 
-    tr.addEventListener('dblclick', (e) => {
+    tr.addEventListener('keydown', (e) => {
+      const activeTab = getActiveTab();
+      if (!activeTab) return;
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        handleBatRowSelection(e, activeTab, file, idx, files);
+      } else if ((e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) && !file.isMissing) {
+        e.preventDefault();
+        const curSet = new Set((activeTab.selectedBatPaths || []).map((p) => p.toLowerCase()));
+        if (!curSet.has(file.path.toLowerCase())) {
+          activeTab.selectedBatPaths = [file.path];
+          activeTab.lastSelectedBatIndex = idx;
+          updateSelectedCountBadge(activeTab);
+          loadBatFileContentForTab(activeTab, file);
+        }
+        const rect = tr.getBoundingClientRect();
+        showBatContextMenu(rect.left + 20, rect.bottom, activeTab);
+      }
+    });
+
+    tr.addEventListener('dblclick', () => {
       closeBatContextMenu();
+      closeGroupContextMenu();
+      if (file.isMissing) return;
       const activeTab = getActiveTab();
       if (activeTab) {
         activeTab.selectedBatPaths = [file.path];
@@ -1488,8 +2208,9 @@ function renderBatFilesTable(files, totalCount, tab) {
     tr.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       e.stopPropagation();
+      closeGroupContextMenu();
       const activeTab = getActiveTab();
-      if (!activeTab) return;
+      if (!activeTab || file.isMissing) return;
 
       const curSet = new Set((activeTab.selectedBatPaths || []).map((p) => p.toLowerCase()));
       if (!curSet.has(file.path.toLowerCase())) {
@@ -1508,6 +2229,8 @@ function renderBatFilesTable(files, totalCount, tab) {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       closeBatContextMenu();
+      closeGroupContextMenu();
+      if (btn.disabled) return;
       const p = btn.getAttribute('data-path');
       runBatScript(p);
     });
@@ -1515,9 +2238,33 @@ function renderBatFilesTable(files, totalCount, tab) {
 }
 
 async function runBatScript(path) {
+  const tab = getActiveTab();
+  if (tab && path) {
+    setBatExecStatus(tab, path, 'running', null);
+    if (tab.id === activeTabId) {
+      applyBatFilterAndRender(tab);
+    }
+  }
   try {
-    await invoke('execute_bat_file', { path });
+    const res = await invoke('execute_bat_file', {
+      tabId: tab ? tab.id : null,
+      path,
+      projectPath: tab && tab.projectPath ? tab.projectPath : null,
+    });
+    if (res && res.screenshot_error) {
+      showAlert(
+        'Auto Save Image Warning',
+        `Batch script was launched, but screenshot auto-save could not be prepared:<br>${escapeHtml(res.screenshot_error)}`,
+        '[!]'
+      );
+    }
   } catch (err) {
+    if (tab && path) {
+      setBatExecStatus(tab, path, 'failed', { error_message: String(err) });
+      if (tab.id === activeTabId) {
+        applyBatFilterAndRender(tab);
+      }
+    }
     showAlert('Execution Error', `Failed to run script: ${escapeHtml(err)}`, '[X]');
   }
 }
@@ -1539,8 +2286,17 @@ function renderGroupRunModal() {
   tbody.innerHTML = '';
   groupRunSteps.forEach((step, idx) => {
     const tr = document.createElement('tr');
+    if (step.status === 'RUNNING') {
+      tr.classList.add('bat-status-running');
+    } else if (step.status === 'OK') {
+      tr.classList.add('bat-status-success');
+    } else if (step.status === 'FAILED') {
+      tr.classList.add('bat-status-failed');
+    } else {
+      tr.classList.add('bat-status-pending');
+    }
     if (idx === groupRunSelectedIdx) {
-      tr.className = 'selected-row';
+      tr.classList.add('selected-row');
     }
 
     let badgeHtml = '<span class="badge badge-gray">PENDING</span>';
@@ -1550,6 +2306,13 @@ function renderGroupRunModal() {
       badgeHtml = '<span class="badge badge-green">OK</span>';
     } else if (step.status === 'FAILED') {
       badgeHtml = '<span class="badge badge-red">FAILED</span>';
+    }
+
+    let imgBadgeHtml = '<span class="badge badge-gray">-</span>';
+    if (step.screenshot_saved) {
+      imgBadgeHtml = '<span class="badge badge-green" title="PNG screenshot saved">SAVED</span>';
+    } else if (step.screenshot_error) {
+      imgBadgeHtml = `<span class="badge badge-red" title="${escapeHtml(step.screenshot_error)}">ERR</span>`;
     }
 
     const exitText =
@@ -1562,6 +2325,7 @@ function renderGroupRunModal() {
       <td style="text-align: center;">${badgeHtml}</td>
       <td style="text-align: center;">${escapeHtml(exitText)}</td>
       <td style="text-align: right;">${escapeHtml(timeText)}</td>
+      <td style="text-align: center;">${imgBadgeHtml}</td>
     `;
 
     tr.addEventListener('click', () => {
@@ -1573,6 +2337,14 @@ function renderGroupRunModal() {
   });
 
   const activeStep = groupRunSteps[groupRunSelectedIdx] || null;
+  const openImgBtn = document.getElementById('modal-btn-open-group-image');
+  if (openImgBtn) {
+    openImgBtn.disabled = !(activeStep && activeStep.screenshot_saved && activeStep.screenshot_path);
+    openImgBtn.title =
+      activeStep && activeStep.screenshot_saved && activeStep.screenshot_path
+        ? `Open ${activeStep.screenshot_path}`
+        : 'Open saved PNG screenshot for selected step';
+  }
   if (outTitle && outLog) {
     if (!activeStep) {
       outTitle.textContent = 'Execution Output';
@@ -1582,6 +2354,11 @@ function renderGroupRunModal() {
       const parts = [];
       if (activeStep.error_message) {
         parts.push(`[ERROR] ${activeStep.error_message}`);
+      }
+      if (activeStep.screenshot_saved && activeStep.screenshot_path) {
+        parts.push(`[IMAGE SAVED] ${activeStep.screenshot_path}`);
+      } else if (activeStep.screenshot_error) {
+        parts.push(`[IMAGE ERROR] ${activeStep.screenshot_error}`);
       }
       if (activeStep.stdout && activeStep.stdout.trim() !== '') {
         parts.push(activeStep.stdout);
@@ -1599,7 +2376,17 @@ function renderGroupRunModal() {
   }
 }
 
-async function runBatGroupSequential(tab, filesInOrder) {
+function runSavedBatchGroup(tab, group) {
+  if (!tab || !group) return;
+  const orderedFiles = resolveGroupOrderedFiles(tab, group);
+  if (orderedFiles.length === 0) {
+    showAlert('Empty Group', `Group "${escapeHtml(group.name)}" contains no BAT files.`, '[!]');
+    return;
+  }
+  runBatGroupSequential(tab, orderedFiles, group);
+}
+
+async function runBatGroupSequential(tab, filesInOrder, groupMeta = null) {
   if (!tab || !filesInOrder || filesInOrder.length === 0) return;
   if (activeGroupRunLocked || tab.isGroupRunning) {
     showAlert('Group Run Busy', 'A batch group execution is already in progress.', '[!]');
@@ -1608,6 +2395,15 @@ async function runBatGroupSequential(tab, filesInOrder) {
 
   activeGroupRunLocked = true;
   tab.isGroupRunning = true;
+  runningGroupId = groupMeta ? groupMeta.id : null;
+  renderGroupsBar(tab);
+
+  const modalTitleEl = document.querySelector('#modal-group-run .title-bar-text');
+  if (modalTitleEl) {
+    modalTitleEl.textContent = groupMeta
+      ? `Run Group - ${groupMeta.name}`
+      : `Run All - Selected BAT Files (${filesInOrder.length})`;
+  }
 
   const summaryEl = document.getElementById('group-run-summary');
   const closeBtn = document.getElementById('modal-btn-close-group-run');
@@ -1624,40 +2420,71 @@ async function runBatGroupSequential(tab, filesInOrder) {
     stdout: '',
     stderr: '',
     error_message: null,
+    screenshot_path: null,
+    screenshot_saved: false,
+    screenshot_error: null,
   }));
   groupRunSelectedIdx = 0;
+
+  // Reset all queued files in this batch run to WAITING / PENDING (Light Yellow)
+  filesInOrder.forEach((f) => {
+    if (f && f.path) {
+      setBatExecStatus(tab, f.path, 'pending', null);
+    }
+  });
+  if (tab.id === activeTabId) {
+    applyBatFilterAndRender(tab);
+  }
 
   openSingleModal('modal-group-run');
   renderGroupRunModal();
 
   let passedCount = 0;
   let failedCount = 0;
+  let imageErrorCount = 0;
   const total = filesInOrder.length;
+  const groupPrefix = groupMeta ? `[${groupMeta.name}] ` : '';
 
   try {
     for (let i = 0; i < total; i++) {
       const file = filesInOrder[i];
       groupRunSteps[i].status = 'RUNNING';
       groupRunSelectedIdx = i;
+      setBatExecStatus(tab, file.path, 'running', null);
+      if (tab.id === activeTabId) {
+        applyBatFilterAndRender(tab);
+      }
       if (summaryEl) {
-        summaryEl.textContent = `Running step ${i + 1} of ${total}: ${file.name}...`;
+        summaryEl.textContent = `${groupPrefix}Running step ${i + 1} of ${total}: ${file.name}...`;
       }
       renderGroupRunModal();
 
       try {
-        const stepRes = await invoke('execute_bat_group_step', { path: file.path });
+        const stepRes = await invoke('execute_bat_group_step', {
+          path: file.path,
+          projectPath: tab.projectPath || null,
+        });
         groupRunSteps[i].duration_ms = stepRes.duration_ms;
         groupRunSteps[i].exit_code = stepRes.exit_code;
         groupRunSteps[i].stdout = stepRes.stdout || '';
         groupRunSteps[i].stderr = stepRes.stderr || '';
         groupRunSteps[i].error_message = stepRes.error_message || null;
+        groupRunSteps[i].screenshot_path = stepRes.screenshot_path || null;
+        groupRunSteps[i].screenshot_saved = !!stepRes.screenshot_saved;
+        groupRunSteps[i].screenshot_error = stepRes.screenshot_error || null;
         groupRunSteps[i].status = stepRes.success ? 'OK' : 'FAILED';
+
+        setBatExecStatus(tab, file.path, stepRes.success ? 'success' : 'failed', stepRes);
+
+        if (stepRes.screenshot_error) {
+          imageErrorCount += 1;
+        }
 
         if (stepRes.success) {
           passedCount += 1;
           appendBuildLogForTab(
             tab.id,
-            `[Group ${i + 1}/${total}] OK: ${file.name} (${stepRes.duration_ms} ms)`
+            `[Group ${i + 1}/${total}] OK: ${file.name} (${stepRes.duration_ms} ms)${stepRes.screenshot_saved ? ' [PNG saved]' : ''}`
           );
         } else {
           failedCount += 1;
@@ -1671,21 +2498,29 @@ async function runBatGroupSequential(tab, filesInOrder) {
         groupRunSteps[i].status = 'FAILED';
         groupRunSteps[i].duration_ms = 0;
         groupRunSteps[i].error_message = String(err);
+        setBatExecStatus(tab, file.path, 'failed', { error_message: String(err) });
         appendBuildLogForTab(
           tab.id,
           `[Group ${i + 1}/${total}] ERROR: ${file.name} - ${err}`
         );
       }
 
+      if (tab.id === activeTabId) {
+        applyBatFilterAndRender(tab);
+      }
       renderGroupRunModal();
     }
   } finally {
     activeGroupRunLocked = false;
     tab.isGroupRunning = false;
+    runningGroupId = null;
+    renderGroupsBar(tab);
     if (closeBtn) closeBtn.disabled = false;
     if (closeXBtn) closeXBtn.disabled = false;
     if (summaryEl) {
-      summaryEl.textContent = `Completed ${total} file(s) sequentially: ${passedCount} succeeded, ${failedCount} failed.`;
+      const imgNote =
+        imageErrorCount > 0 ? ` (${imageErrorCount} screenshot error(s))` : '';
+      summaryEl.textContent = `${groupPrefix}Completed ${total} file(s) sequentially: ${passedCount} succeeded, ${failedCount} failed.${imgNote}`;
     }
   }
 }
@@ -1715,6 +2550,8 @@ async function executeBuildForActiveTab() {
   tab.consoleLogs = '';
 
   tab.footerStatusText = 'Building...';
+  tab.footerStatusTime = '';
+  tab.footerStatusKind = 'neutral';
 
   renderTabsBar();
   syncUIToActiveTab();
@@ -1760,20 +2597,21 @@ async function executeBuildForActiveTab() {
     }
 
     if (res.success) {
-      const doneAt = formatCurrentTimeHHMMSS();
+      const doneAt = formatCurrentDateTime();
       tab.buildStatus = '\u2714 BUILD SUCCESSFUL';
       tab.buildStatusClass = 'badge-green';
-      setTabFooterStatus(tab, `Build Successful (${doneAt})`);
+      setTabFooterStatus(tab, 'Build Success', doneAt, 'ok');
     } else {
+      const doneAt = formatCurrentDateTime();
       tab.buildStatus = '\u2716 BUILD FAILED';
       tab.buildStatusClass = 'badge-red';
-      setTabFooterStatus(tab, 'Build Failed');
+      setTabFooterStatus(tab, 'Build Failed', doneAt, 'err');
     }
   } catch (err) {
     console.error('Build execution failed:', err);
     tab.buildStatus = '\u2716 BUILD ERROR';
     tab.buildStatusClass = 'badge-red';
-    setTabFooterStatus(tab, 'Error');
+    setTabFooterStatus(tab, 'Build Error', formatCurrentDateTime(), 'err');
     appendBuildLogForTab(tab.id, `[ERROR] ${err}`);
     if (tab.id === activeTabId) {
       showAlert('Build Error', `Failed to execute build: ${err}`, '[X]');
@@ -1984,18 +2822,27 @@ async function loadJdkOptions() {
 
 async function loadUserSetting() {
   try {
-    const [setting, settingPath] = await Promise.all([
+    const [setting, settingPath, defaultImgDir] = await Promise.all([
       invoke('get_user_setting'),
       invoke('get_user_setting_path'),
+      invoke('get_default_screenshot_dir').catch(() => ''),
     ]);
     if (setting) {
       userSetting = setting;
+    }
+    if (defaultImgDir) {
+      defaultScreenshotRootDir = defaultImgDir;
     }
     updateFooterConfigVal();
     const descEl = document.getElementById('modal-setting-file-desc');
     if (descEl && settingPath) {
       descEl.textContent = `File: ${settingPath}`;
       descEl.title = settingPath;
+    }
+    const hintEl = document.getElementById('setting-screenshot-default-hint');
+    if (hintEl && defaultImgDir) {
+      hintEl.textContent = `Default Root: ${defaultImgDir}\\{project}\\{bat}.png (overwrites existing)`;
+      hintEl.title = hintEl.textContent;
     }
   } catch (err) {
     console.error('Load user setting failed:', err);
@@ -2006,26 +2853,64 @@ function updateFooterConfigVal() {
   const valEl = document.getElementById('footer-config-val');
   if (valEl) {
     const capText = userSetting.auto_capture_clipboard ? 'Shot:ON' : 'Shot:OFF';
-    valEl.textContent = `${userSetting.ps_window_width}x${userSetting.ps_window_height} (${capText})`;
+    const imgText = userSetting.auto_save_image ? 'Img:ON' : 'Img:OFF';
+    valEl.textContent = `${userSetting.ps_window_width}x${userSetting.ps_window_height} (${capText} | ${imgText})`;
   }
 }
 
 function updateScreenshotToggleBadge() {
   const capEl = document.getElementById('setting-auto-capture');
   const badgeEl = document.getElementById('setting-auto-capture-state');
-  if (!capEl || !badgeEl) return;
-  const enabled = !!capEl.checked;
-  badgeEl.textContent = enabled ? 'ON' : 'OFF';
-  badgeEl.className = `badge ${enabled ? 'badge-green' : 'badge-gray'}`;
+  if (capEl && badgeEl) {
+    const enabled = !!capEl.checked;
+    badgeEl.textContent = enabled ? 'ON' : 'OFF';
+    badgeEl.className = `badge ${enabled ? 'badge-green' : 'badge-gray'}`;
+  }
+
+  const saveImgEl = document.getElementById('setting-auto-save-image');
+  const saveImgBadge = document.getElementById('setting-auto-save-image-state');
+  if (saveImgEl && saveImgBadge) {
+    const enabled = !!saveImgEl.checked;
+    saveImgBadge.textContent = enabled ? 'ON' : 'OFF';
+    saveImgBadge.className = `badge ${enabled ? 'badge-green' : 'badge-gray'}`;
+  }
+
+  const unsavedEl = document.getElementById('setting-unsaved-note');
+  if (unsavedEl) {
+    const curSaveImg = saveImgEl ? !!saveImgEl.checked : false;
+    const curCap = capEl ? !!capEl.checked : false;
+    const curDirRaw = (document.getElementById('setting-screenshot-dir')?.value || '').trim();
+    const savedDirNorm = (userSetting.screenshot_save_dir || defaultScreenshotRootDir || '')
+      .replace(/[\\/]+$/, '')
+      .toLowerCase();
+    const curDirNorm = curDirRaw.replace(/[\\/]+$/, '').toLowerCase();
+    const hasChanges =
+      curSaveImg !== !!userSetting.auto_save_image ||
+      curCap !== !!userSetting.auto_capture_clipboard ||
+      (curDirNorm !== savedDirNorm && !(curDirNorm === '' && !userSetting.screenshot_save_dir));
+    if (hasChanges) {
+      unsavedEl.style.display = 'block';
+      unsavedEl.textContent = 'Unsaved change(s): click [Save] below to apply and persist to setting.json.';
+    } else {
+      unsavedEl.style.display = 'none';
+      unsavedEl.textContent = '';
+    }
+  }
 }
 
 function populateSettingsModal() {
   const widthEl = document.getElementById('setting-ps-width');
   const heightEl = document.getElementById('setting-ps-height');
   const capEl = document.getElementById('setting-auto-capture');
+  const saveImgEl = document.getElementById('setting-auto-save-image');
+  const saveDirEl = document.getElementById('setting-screenshot-dir');
   if (widthEl) widthEl.value = userSetting.ps_window_width;
   if (heightEl) heightEl.value = userSetting.ps_window_height;
   if (capEl) capEl.checked = !!userSetting.auto_capture_clipboard;
+  if (saveImgEl) saveImgEl.checked = !!userSetting.auto_save_image;
+  if (saveDirEl) {
+    saveDirEl.value = userSetting.screenshot_save_dir || defaultScreenshotRootDir || '';
+  }
   updateScreenshotToggleBadge();
 }
 
@@ -2276,24 +3161,11 @@ function setupUIEvents() {
     try {
       const folder = await invoke('pick_folder');
       if (folder) {
-        const tab = getActiveTab() || addNewProjectTab(folder);
-        if (tab.id === activeTabId) {
-          const inputEl = document.getElementById('project-path-input');
-          if (inputEl) {
-            inputEl.value = folder;
-            inputEl.dataset.tabId = tab.id;
-          }
-        }
-        const newSettings = await invoke('add_project_history', { path: folder });
-        historyListCache = newSettings.history || [];
-        if (tab.id === activeTabId) {
-          updateHistoryDropdown(historyListCache, folder);
-        }
-        await scanProjectForTab(tab, folder);
-        await persistTabsToHistory();
+        await openOrSwitchProject(folder);
       }
     } catch (err) {
       console.error('Browse folder error:', err);
+      showAlert('Browse Folder Error', escapeHtml(String(err)), '[X]');
     }
   });
 
@@ -2316,31 +3188,42 @@ function setupUIEvents() {
     });
   }
 
-  // 3. Enter key or change in project path input (bound safely to focused tabId)
+  // 3. Enter key or change in project path input (reuse existing tab or open new tab)
   const inputPathEl = document.getElementById('project-path-input');
+  let lastSubmittedPathInput = '';
   const triggerPathScan = async (explicitTabId = null) => {
     const cleanPath = (inputPathEl.value || '').trim();
-    const tab = (explicitTabId && getTabById(explicitTabId)) || getActiveTab();
-    if (tab && cleanPath !== '' && cleanPath !== (tab.projectPath || '').trim()) {
-      const newSettings = await invoke('add_project_history', { path: cleanPath });
-      historyListCache = newSettings.history || [];
-      if (tab.id === activeTabId) {
-        updateHistoryDropdown(historyListCache, cleanPath);
-      }
-      await scanProjectForTab(tab, cleanPath);
-      await persistTabsToHistory();
+    if (!cleanPath) return;
+    const ownerTab = (explicitTabId && getTabById(explicitTabId)) || getActiveTab();
+    if (ownerTab && normalizeProjectPathKeyLocal(cleanPath) === getTabProjectKey(ownerTab)) {
+      return;
+    }
+    lastSubmittedPathInput = cleanPath;
+    try {
+      await openOrSwitchProject(cleanPath);
+    } catch (err) {
+      console.error('Open project path failed:', err);
+      showAlert('Open Project Error', escapeHtml(String(err)), '[X]');
     }
   };
 
   inputPathEl.addEventListener('focus', () => {
     inputPathEl.dataset.tabId = activeTabId;
   });
+  inputPathEl.addEventListener('input', () => {
+    lastSubmittedPathInput = '';
+  });
   inputPathEl.addEventListener('keydown', async (e) => {
     if (e.key === 'Enter') {
+      e.preventDefault();
       await triggerPathScan(activeTabId);
     }
   });
   inputPathEl.addEventListener('change', async () => {
+    const curVal = (inputPathEl.value || '').trim();
+    if (curVal && curVal === lastSubmittedPathInput) {
+      return;
+    }
     await triggerPathScan(inputPathEl.dataset.tabId || activeTabId);
   });
 
@@ -2486,6 +3369,65 @@ function setupUIEvents() {
     if (menu && menu.style.display !== 'none' && !menu.contains(e.target)) {
       closeBatContextMenu();
     }
+    const grpMenu = document.getElementById('group-context-menu');
+    if (grpMenu && grpMenu.style.display !== 'none' && !grpMenu.contains(e.target)) {
+      closeGroupContextMenu();
+    }
+  });
+
+  // Track whether the BAT file list zone is active for keyboard shortcuts (Ctrl + A)
+  const updateBatActiveZone = (target) => {
+    if (!target || typeof target.closest !== 'function') return;
+    if (target.closest('#bat-table-container') || target.closest('#bat-groups-bar')) {
+      batListActive = true;
+    } else if (
+      !target.closest('#bat-context-menu') &&
+      !target.closest('#group-context-menu')
+    ) {
+      batListActive = false;
+    }
+  };
+  document.addEventListener('mousedown', (e) => updateBatActiveZone(e.target));
+  document.addEventListener('focusin', (e) => updateBatActiveZone(e.target));
+
+  document.addEventListener('keydown', (e) => {
+    if (e.isComposing) return;
+    const isCtrlA =
+      (e.ctrlKey || e.metaKey) &&
+      !e.altKey &&
+      !e.shiftKey &&
+      e.key &&
+      e.key.toLowerCase() === 'a';
+    if (!isCtrlA) return;
+    if (isAnyModalVisible()) return;
+
+    const ae = document.activeElement;
+    if (ae) {
+      const tag = (ae.tagName || '').toUpperCase();
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || ae.isContentEditable) {
+        return;
+      }
+      if (typeof ae.closest === 'function') {
+        if (ae.closest('#bat-preview-pane') || ae.closest('#cmd-panel-box')) {
+          return;
+        }
+      }
+    }
+
+    const tableContainer = document.getElementById('bat-table-container');
+    const inBatContainer = !!(tableContainer && ae && tableContainer.contains(ae));
+    if (!batListActive && !inBatContainer) {
+      return;
+    }
+
+    const activeTab = getActiveTab();
+    if (!activeTab) return;
+    closeBatContextMenu();
+    closeGroupContextMenu();
+    if (selectAllVisibleBatFiles(activeTab)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
   });
 
   setupBatSplitResizer();
@@ -2512,6 +3454,92 @@ function setupUIEvents() {
     if (!tab) return;
     tab.cmdPanelExpanded = !tab.cmdPanelExpanded;
     syncUIToActiveTab();
+  });
+
+  // 10c. Clear All Log (Displayed console logs & optional disk target .log truncation with confirmation)
+  const clearAllLogsForTab = async (tab, includeDiskFiles = false) => {
+    if (!tab) return;
+    tab.consoleLogs = '';
+    if (tab.id === activeTabId) {
+      const consoleEl = document.getElementById('build-console-output');
+      if (consoleEl) {
+        consoleEl.textContent = '';
+      }
+      const clearAllBtn = document.getElementById('btn-clear-all-log');
+      if (clearAllBtn) {
+        clearAllBtn.disabled = !(tab.projectPath && tab.projectPath.trim() !== '');
+      }
+    }
+
+    if (!includeDiskFiles || !tab.projectPath || tab.projectPath.trim() === '') {
+      setTabFooterStatus(tab, 'Logs cleared', formatCurrentDateTime(), 'ok');
+      return;
+    }
+
+    try {
+      const clearRes = await invoke('clear_target_logs', {
+        projectPath: tab.projectPath,
+        target: tab.selectedTarget || null,
+        logFolderPath: tab.logFolder || null,
+        batchLogName: tab.batchLogName || null,
+        appLogName: tab.appLogName || null,
+      });
+      const clearedCount = (clearRes && clearRes.cleared_files && clearRes.cleared_files.length) || 0;
+      const failedList = (clearRes && clearRes.failed_files) || [];
+      if (failedList.length > 0) {
+        setTabFooterStatus(tab, `Cleared ${clearedCount} log(s), ${failedList.length} locked`, formatCurrentDateTime(), 'err');
+        showAlert(
+          'Clear Log Partial Warning',
+          `Console log cleared and truncated ${clearedCount} target .log file(s), but ${failedList.length} file(s) could not be modified:<br><br>${failedList.map(escapeHtml).join('<br>')}`,
+          '[!]'
+        );
+      } else {
+        setTabFooterStatus(tab, `Cleared all logs (${clearedCount} file(s))`, formatCurrentDateTime(), 'ok');
+      }
+    } catch (err) {
+      setTabFooterStatus(tab, 'Clear log failed', formatCurrentDateTime(), 'err');
+      showAlert('Clear Log Error', `Failed to clear target log files:<br>${escapeHtml(String(err))}`, '[X]');
+    }
+  };
+
+  let pendingClearLogTabId = '';
+  const closeClearLogConfirmModal = () => {
+    const el = document.getElementById('modal-confirm-clear-log');
+    if (el) el.style.display = 'none';
+    pendingClearLogTabId = '';
+  };
+
+  document.getElementById('btn-clear-cmd-log').addEventListener('click', () => {
+    const tab = getActiveTab();
+    if (!tab) return;
+    clearAllLogsForTab(tab, false);
+  });
+
+  document.getElementById('btn-clear-all-log').addEventListener('click', () => {
+    const tab = getActiveTab();
+    if (!tab) return;
+    pendingClearLogTabId = tab.id;
+    const msgEl = document.getElementById('clear-log-confirm-msg');
+    if (msgEl) {
+      const targetNote = tab.logFolder
+        ? escapeHtml(tab.logFolder)
+        : tab.projectPath
+          ? `${escapeHtml(tab.projectPath)}\\target\\log`
+          : '(No project selected)';
+      msgEl.innerHTML =
+        `Clear all displayed CMD logs and truncate all <b>.log</b> files inside:<br>` +
+        `<span class="text-mono">${targetNote}</span><br><br>` +
+        `This leaves all <b>.bat</b> files, project history, and saved settings untouched.`;
+    }
+    openSingleModal('modal-confirm-clear-log');
+  });
+
+  document.getElementById('btn-close-modal-clear-log').addEventListener('click', closeClearLogConfirmModal);
+  document.getElementById('modal-btn-cancel-clear-log').addEventListener('click', closeClearLogConfirmModal);
+  document.getElementById('modal-btn-confirm-clear-log').addEventListener('click', async () => {
+    const tab = (pendingClearLogTabId && getTabById(pendingClearLogTabId)) || getActiveTab();
+    closeClearLogConfirmModal();
+    await clearAllLogsForTab(tab, true);
   });
 
   // 11. Footer Click -> Open Single Non-Overlapping Modal
@@ -2733,13 +3761,61 @@ function setupUIEvents() {
     updateScreenshotToggleBadge();
   });
 
+  document.getElementById('setting-auto-save-image').addEventListener('change', () => {
+    updateScreenshotToggleBadge();
+  });
+
+  document.getElementById('modal-btn-browse-screenshot-dir').addEventListener('click', async () => {
+    try {
+      const folder = await invoke('pick_folder');
+      if (folder) {
+        const dirEl = document.getElementById('setting-screenshot-dir');
+        if (dirEl) dirEl.value = folder;
+      }
+    } catch (err) {
+      console.error('Browse screenshot folder failed:', err);
+    }
+  });
+
+  document.getElementById('modal-btn-default-screenshot-dir').addEventListener('click', () => {
+    const dirEl = document.getElementById('setting-screenshot-dir');
+    if (dirEl) {
+      dirEl.value = defaultScreenshotRootDir || '';
+    }
+    updateScreenshotToggleBadge();
+  });
+
+  document.getElementById('setting-screenshot-dir').addEventListener('input', () => {
+    updateScreenshotToggleBadge();
+  });
+
+  document.getElementById('modal-btn-open-screenshot-dir').addEventListener('click', async () => {
+    const dirEl = document.getElementById('setting-screenshot-dir');
+    const customRaw = dirEl ? (dirEl.value || '').trim() : '';
+    const isSameAsDefault =
+      defaultScreenshotRootDir &&
+      customRaw.replace(/[\\/]+$/, '').toLowerCase() ===
+        defaultScreenshotRootDir.replace(/[\\/]+$/, '').toLowerCase();
+    try {
+      await invoke('open_screenshot_directory', {
+        customDir: !customRaw || isSameAsDefault ? null : customRaw,
+      });
+    } catch (err) {
+      showAlert('Open Folder Error', `Failed to open screenshot directory:<br>${escapeHtml(String(err))}`, '[X]');
+    }
+  });
+
   document.getElementById('modal-btn-reset-settings').addEventListener('click', () => {
     const widthEl = document.getElementById('setting-ps-width');
     const heightEl = document.getElementById('setting-ps-height');
     const capEl = document.getElementById('setting-auto-capture');
+    const saveImgEl = document.getElementById('setting-auto-save-image');
+    const dirEl = document.getElementById('setting-screenshot-dir');
     if (widthEl) widthEl.value = 1000;
     if (heightEl) heightEl.value = 650;
     if (capEl) capEl.checked = true;
+    if (saveImgEl) saveImgEl.checked = false;
+    if (dirEl) dirEl.value = defaultScreenshotRootDir || '';
     updateScreenshotToggleBadge();
   });
 
@@ -2759,6 +3835,13 @@ function setupUIEvents() {
     const widthVal = parseInt(document.getElementById('setting-ps-width').value, 10) || 1000;
     const heightVal = parseInt(document.getElementById('setting-ps-height').value, 10) || 650;
     const autoCapVal = !!document.getElementById('setting-auto-capture').checked;
+    const autoSaveImgVal = !!document.getElementById('setting-auto-save-image').checked;
+    const rawDirVal = (document.getElementById('setting-screenshot-dir').value || '').trim();
+    const isSameAsDefault =
+      defaultScreenshotRootDir &&
+      rawDirVal.replace(/[\\/]+$/, '').toLowerCase() ===
+        defaultScreenshotRootDir.replace(/[\\/]+$/, '').toLowerCase();
+    const saveDirVal = !rawDirVal || isSameAsDefault ? null : rawDirVal;
 
     try {
       const saved = await invoke('save_user_setting', {
@@ -2766,18 +3849,21 @@ function setupUIEvents() {
           ps_window_width: widthVal,
           ps_window_height: heightVal,
           auto_capture_clipboard: autoCapVal,
+          auto_save_image: autoSaveImgVal,
+          screenshot_save_dir: saveDirVal,
         },
       });
       userSetting = saved;
       updateFooterConfigVal();
       closeSettingsModal();
+      const effectivePath = saved.screenshot_save_dir || defaultScreenshotRootDir || '(Default)';
       showAlert(
         'Settings Saved',
-        `<b>Window Size:</b> ${saved.ps_window_width} x ${saved.ps_window_height} px<br><b>Auto Capture:</b> ${saved.auto_capture_clipboard ? 'ON' : 'OFF'}`,
+        `<b>Window Size:</b> ${saved.ps_window_width} x ${saved.ps_window_height} px<br><b>Auto Capture:</b> ${saved.auto_capture_clipboard ? 'ON' : 'OFF'}<br><b>Auto Save Image:</b> ${saved.auto_save_image ? 'ON' : 'OFF'}<br><b>Image Path:</b> ${escapeHtml(effectivePath)}`,
         '[OK]'
       );
     } catch (err) {
-      showAlert('Save Error', `Failed to save setting.json: ${err}`, '[X]');
+      showAlert('Save Error', `Failed to save setting.json:<br>${escapeHtml(String(err))}`, '[X]');
     }
   });
 
@@ -2857,6 +3943,108 @@ function setupUIEvents() {
   };
   document.getElementById('btn-close-modal-group-run').addEventListener('click', closeGroupRunModal);
   document.getElementById('modal-btn-close-group-run').addEventListener('click', closeGroupRunModal);
+  document.getElementById('modal-btn-open-group-image').addEventListener('click', async () => {
+    const activeStep = groupRunSteps[groupRunSelectedIdx] || null;
+    if (!activeStep || !activeStep.screenshot_path) return;
+    try {
+      await invoke('open_file_default', { path: activeStep.screenshot_path });
+    } catch (err) {
+      showAlert('Open Image Error', `Failed to open screenshot:<br>${escapeHtml(String(err))}`, '[X]');
+    }
+  });
+
+  // Add Batch Group Modal Handlers
+  const closeAddGroupModal = () => {
+    document.getElementById('modal-add-group').style.display = 'none';
+    addGroupPendingFiles = [];
+    addGroupPendingTabId = '';
+  };
+
+  const submitAddGroupModal = async () => {
+    const tab = (addGroupPendingTabId && getTabById(addGroupPendingTabId)) || getActiveTab();
+    const errorEl = document.getElementById('add-group-error');
+    const radioNew = document.getElementById('add-group-mode-new');
+    const newNameEl = document.getElementById('add-group-new-name');
+    const existingSelEl = document.getElementById('add-group-existing-select');
+    const saveBtn = document.getElementById('modal-btn-save-add-group');
+
+    const showErr = (msg) => {
+      if (errorEl) {
+        errorEl.style.display = 'block';
+        errorEl.textContent = msg;
+      }
+    };
+
+    if (!tab || !tab.projectPath) {
+      showErr('Please select a project directory first.');
+      return;
+    }
+    const filePaths = (addGroupPendingFiles || []).map((f) => f.path).filter(Boolean);
+    if (filePaths.length === 0) {
+      showErr('No valid .bat files selected.');
+      return;
+    }
+
+    const isNewMode = radioNew ? !!radioNew.checked : true;
+    try {
+      if (saveBtn) saveBtn.disabled = true;
+      let updatedGroups = [];
+      if (isNewMode) {
+        const groupName = (newNameEl && newNameEl.value ? newNameEl.value : '').trim();
+        if (!groupName) {
+          showErr('Please enter a group name.');
+          if (newNameEl) newNameEl.focus();
+          return;
+        }
+        updatedGroups = await invoke('create_batch_group', {
+          projectPath: tab.projectPath,
+          name: groupName,
+          files: filePaths,
+        });
+      } else {
+        const groupId = existingSelEl ? existingSelEl.value : '';
+        if (!groupId) {
+          showErr('Please select an existing group.');
+          return;
+        }
+        updatedGroups = await invoke('add_files_to_batch_group', {
+          projectPath: tab.projectPath,
+          groupId,
+          files: filePaths,
+        });
+      }
+
+      tab.groups = Array.isArray(updatedGroups) ? updatedGroups : [];
+      closeAddGroupModal();
+      if (tab.id === activeTabId) {
+        renderGroupsBar(tab);
+        applyBatFilterAndRender(tab);
+      }
+    } catch (err) {
+      showErr(String(err));
+    } finally {
+      if (saveBtn) saveBtn.disabled = false;
+    }
+  };
+
+  document.getElementById('btn-close-modal-add-group').addEventListener('click', closeAddGroupModal);
+  document.getElementById('modal-btn-cancel-add-group').addEventListener('click', closeAddGroupModal);
+  document.getElementById('modal-btn-save-add-group').addEventListener('click', submitAddGroupModal);
+
+  document.getElementById('add-group-new-name').addEventListener('focus', () => {
+    const radioNew = document.getElementById('add-group-mode-new');
+    if (radioNew) radioNew.checked = true;
+  });
+  document.getElementById('add-group-existing-select').addEventListener('focus', () => {
+    const radioExisting = document.getElementById('add-group-mode-existing');
+    if (radioExisting && !radioExisting.disabled) radioExisting.checked = true;
+  });
+  document.getElementById('add-group-new-name').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submitAddGroupModal();
+    }
+  });
 
   // Browse custom JDK folder in Modal (mark manual pick)
   // Browse custom Ant folder in Modal
@@ -2901,6 +4089,14 @@ function setupUIEvents() {
       return;
     }
 
+    const grpCtxMenu = document.getElementById('group-context-menu');
+    if (grpCtxMenu && grpCtxMenu.style.display !== 'none') {
+      closeGroupContextMenu();
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
     const histMenu = document.getElementById('history-dropdown-menu');
     if (histMenu && histMenu.style.display !== 'none') {
       closeHistoryMenu();
@@ -2911,6 +4107,20 @@ function setupUIEvents() {
 
     if (isModalVisible('alert-modal')) {
       closeAlert();
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
+    if (isModalVisible('modal-confirm-clear-log')) {
+      closeClearLogConfirmModal();
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
+    if (isModalVisible('modal-add-group')) {
+      closeAddGroupModal();
       e.preventDefault();
       e.stopPropagation();
       return;
@@ -3111,16 +4321,28 @@ async function init() {
       const widthEl = document.getElementById('setting-ps-width');
       const heightEl = document.getElementById('setting-ps-height');
       const capEl = document.getElementById('setting-auto-capture');
+      const saveImgEl = document.getElementById('setting-auto-save-image');
+      const dirEl = document.getElementById('setting-screenshot-dir');
       if (widthEl) widthEl.value = width;
       if (heightEl) heightEl.value = height;
 
       const autoCapVal = capEl ? !!capEl.checked : !!userSetting.auto_capture_clipboard;
+      const autoSaveImgVal = saveImgEl ? !!saveImgEl.checked : !!userSetting.auto_save_image;
+      const rawDir = dirEl ? (dirEl.value || '').trim() : userSetting.screenshot_save_dir || '';
+      const isDefaultDir =
+        defaultScreenshotRootDir &&
+        rawDir.replace(/[\\/]+$/, '').toLowerCase() ===
+          defaultScreenshotRootDir.replace(/[\\/]+$/, '').toLowerCase();
+      const saveDirVal = !rawDir || isDefaultDir ? null : rawDir;
+
       try {
         const saved = await invoke('save_user_setting', {
           setting: {
             ps_window_width: width,
             ps_window_height: height,
             auto_capture_clipboard: autoCapVal,
+            auto_save_image: autoSaveImgVal,
+            screenshot_save_dir: saveDirVal,
           },
         });
         userSetting = saved;
@@ -3133,6 +4355,46 @@ async function init() {
     });
   } catch (err) {
     console.error('Failed to attach cmd-size-picker-done listener:', err);
+  }
+
+  try {
+    await listen('bat-execution-finished', (event) => {
+      const payload = event.payload;
+      if (!payload) return;
+
+      const targetTab = (payload.tab_id && getTabById(payload.tab_id)) || getActiveTab();
+      if (targetTab && payload.path) {
+        setBatExecStatus(targetTab, payload.path, payload.success ? 'success' : 'failed', payload);
+        if (targetTab.id === activeTabId) {
+          applyBatFilterAndRender(targetTab);
+        }
+        if (payload.screenshot_saved && payload.screenshot_path) {
+          setTabFooterStatus(
+            targetTab,
+            `Screenshot saved: ${payload.bat_name || 'batch'}`,
+            formatCurrentDateTime(),
+            'ok'
+          );
+        } else if (!payload.success) {
+          setTabFooterStatus(
+            targetTab,
+            `BAT Failed: ${payload.bat_name || 'batch'}`,
+            formatCurrentDateTime(),
+            'err'
+          );
+        }
+      }
+
+      if (payload.screenshot_error) {
+        showAlert(
+          'Auto Save Image Failed',
+          `<b>File:</b> ${escapeHtml(payload.bat_name || '')}<br><b>Destination:</b> ${escapeHtml(payload.screenshot_path || '')}<br><b>Error:</b> ${escapeHtml(payload.screenshot_error || 'Unknown error')}`,
+          '[!]'
+        );
+      }
+    });
+  } catch (err) {
+    console.error('Failed to attach bat-execution-finished listener:', err);
   }
 
   await Promise.allSettled([

@@ -100,10 +100,13 @@ mod tests {
         let original = load_user_setting();
         assert!(path.exists());
 
+        let custom_dir = std::env::temp_dir().join(format!("bh_img_dir_{}", std::process::id()));
         let custom = UserSetting {
             ps_window_width: 1280,
             ps_window_height: 720,
             auto_capture_clipboard: false,
+            auto_save_image: true,
+            screenshot_save_dir: Some(custom_dir.to_string_lossy().to_string()),
         };
         let saved = save_user_setting(&custom).unwrap();
         assert_eq!(saved, custom);
@@ -113,10 +116,15 @@ mod tests {
             ps_window_width: 50,
             ps_window_height: 99999,
             auto_capture_clipboard: true,
+            auto_save_image: false,
+            screenshot_save_dir: None,
         })
         .unwrap();
         assert_eq!(clamped.ps_window_width, MIN_PS_WIDTH);
         assert_eq!(clamped.ps_window_height, MAX_PS_HEIGHT);
+        assert!(!clamped.auto_save_image);
+
+        let _ = std::fs::remove_dir_all(&custom_dir);
 
         if existed_before {
             let _ = save_user_setting(&original);
@@ -172,11 +180,15 @@ mod tests {
             ps_window_width: 1120,
             ps_window_height: 720,
             auto_capture_clipboard: true,
+            auto_save_image: false,
+            screenshot_save_dir: None,
         };
         let script = build_powershell_run_script(
             r"C:\proj\target\batch\batfiles",
             "demo.bat",
             &setting,
+            None,
+            None,
         );
 
         assert!(script.contains("Write-Host ('PS ' + (Get-Location).Path + '> .\\demo.bat')"));
@@ -194,11 +206,15 @@ mod tests {
             ps_window_width: 1000,
             ps_window_height: 650,
             auto_capture_clipboard: false,
+            auto_save_image: false,
+            screenshot_save_dir: None,
         };
         let no_cap_script = build_powershell_run_script(
             r"C:\proj\target\batch\batfiles",
             "demo.bat",
             &no_cap_setting,
+            None,
+            None,
         );
         assert!(no_cap_script.contains("Write-Host ('PS ' + (Get-Location).Path + '> .\\demo.bat')"));
         assert!(!no_cap_script.contains("function global:prompt"));
@@ -473,13 +489,14 @@ mod tests {
         std::fs::write(&ok_bat, encode_text(ok_content, TextEncoding::ShiftJis).unwrap()).unwrap();
         std::fs::write(&fail_bat, encode_text(fail_content, TextEncoding::ShiftJis).unwrap()).unwrap();
 
-        let step1 = execute_bat_group_step(&ok_bat.to_string_lossy());
+        let default_setting = crate::modules::app_config::UserSetting::default();
+        let step1 = execute_bat_group_step_with_setting(&ok_bat.to_string_lossy(), None, &default_setting);
         assert!(step1.success);
         assert_eq!(step1.exit_code, Some(0));
         assert!(step1.stdout.contains("\u{6b63}\u{5e38}\u{7d42}\u{4e86}"));
         assert!(!step1.stdout.contains("????"));
 
-        let step2 = execute_bat_group_step(&fail_bat.to_string_lossy());
+        let step2 = execute_bat_group_step_with_setting(&fail_bat.to_string_lossy(), None, &default_setting);
         assert!(!step2.success);
         assert_eq!(step2.exit_code, Some(2));
         assert!(step2.stdout.contains("\u{5931}\u{6557}\u{30c6}\u{30b9}\u{30c8}"));
@@ -691,5 +708,656 @@ mod tests {
         assert!(!res.message.trim().is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_batch_groups_persistence_and_project_isolation() {
+        let original = load_settings();
+        let proj_a = r"C:\__bh_group_test_proj_a__";
+        let proj_b = r"C:\__bh_group_test_proj_b__";
+
+        // Clean any leftover test keys
+        for g in get_project_groups(proj_a) {
+            let _ = delete_batch_group(proj_a, &g.id);
+        }
+        for g in get_project_groups(proj_b) {
+            let _ = delete_batch_group(proj_b, &g.id);
+        }
+
+        // Create group in project A with duplicates in selection -> deduped & ordered
+        let created_a = create_batch_group(
+            proj_a,
+            "Daily Batch",
+            vec![
+                r"C:\__bh_group_test_proj_a__\target\batch\batfiles\01_First.bat".to_string(),
+                r"C:\__bh_group_test_proj_a__\target\batch\batfiles\02_Second.bat".to_string(),
+                r"c:\__bh_group_test_proj_a__\target\batch\batfiles\01_First.bat".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(created_a.len(), 1);
+        assert_eq!(created_a[0].name, "Daily Batch");
+        assert_eq!(created_a[0].files.len(), 2);
+        assert!(created_a[0].files[0].ends_with("01_First.bat"));
+        assert!(created_a[0].files[1].ends_with("02_Second.bat"));
+
+        // Duplicate group name rejected within same project
+        let dup_err = create_batch_group(
+            proj_a,
+            "daily batch",
+            vec![r"C:\__bh_group_test_proj_a__\03_Third.bat".to_string()],
+        );
+        assert!(dup_err.is_err());
+
+        // Project B has independent groups (same name allowed independently)
+        let created_b = create_batch_group(
+            proj_b,
+            "Daily Batch",
+            vec![r"C:\__bh_group_test_proj_b__\target\batch\batfiles\B_Only.bat".to_string()],
+        )
+        .unwrap();
+        assert_eq!(created_b.len(), 1);
+        assert_eq!(get_project_groups(proj_a).len(), 1);
+        assert_eq!(get_project_groups(proj_b).len(), 1);
+
+        // Append to existing group in project A: preserves existing files, appends new, prevents duplicates
+        let group_a_id = created_a[0].id.clone();
+        let appended_a = add_files_to_batch_group(
+            proj_a,
+            &group_a_id,
+            vec![
+                r"C:\__bh_group_test_proj_a__\target\batch\batfiles\02_Second.bat".to_string(),
+                r"C:\__bh_group_test_proj_a__\target\batch\batfiles\03_Third.bat".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(appended_a[0].files.len(), 3);
+        assert!(appended_a[0].files[0].ends_with("01_First.bat"));
+        assert!(appended_a[0].files[1].ends_with("02_Second.bat"));
+        assert!(appended_a[0].files[2].ends_with("03_Third.bat"));
+
+        // Reload from disk verifies persistence
+        let reloaded_a = get_project_groups(proj_a);
+        assert_eq!(reloaded_a.len(), 1);
+        assert_eq!(reloaded_a[0].files.len(), 3);
+
+        let _ = save_settings(&original);
+    }
+
+    #[test]
+    fn test_auto_save_image_paths_overwrite_and_compat() {
+        use crate::modules::app_config::*;
+
+        // Backward-compatible deserialization of legacy setting.json without auto_save_image / screenshot_save_dir
+        let legacy_json = r#"{"ps_window_width": 900, "ps_window_height": 600, "auto_capture_clipboard": false}"#;
+        let parsed: UserSetting = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed.ps_window_width, 900);
+        assert_eq!(parsed.ps_window_height, 600);
+        assert!(!parsed.auto_capture_clipboard);
+        assert!(!parsed.auto_save_image);
+        assert_eq!(parsed.screenshot_save_dir, None);
+
+        // Default screenshot root MUST be in setting.json's parent directory / image
+        let expected_parent = get_setting_file_path().parent().unwrap().to_path_buf();
+        let def_root = get_default_screenshot_root_dir();
+        assert_eq!(def_root, expected_parent.join("image"));
+
+        let default_setting = UserSetting {
+            auto_save_image: true,
+            screenshot_save_dir: None,
+            ..UserSetting::default()
+        };
+        let out_default = resolve_screenshot_output_path(
+            &default_setting,
+            Some(r"C:\work\yoshizuya-corepkg"),
+            r"C:\work\yoshizuya-corepkg\target\batch\batfiles\MSTB590021_CreateSGTorihikisaki.bat",
+        );
+        assert_eq!(
+            out_default,
+            def_root
+                .join("yoshizuya-corepkg")
+                .join("MSTB590021_CreateSGTorihikisaki.png")
+        );
+
+        // Deterministic overwrite: calling again produces identical path with no timestamps
+        let out_default_2 = resolve_screenshot_output_path(
+            &default_setting,
+            Some(r"C:\work\yoshizuya-corepkg"),
+            r"C:\work\yoshizuya-corepkg\target\batch\batfiles\MSTB590021_CreateSGTorihikisaki.bat",
+        );
+        assert_eq!(out_default, out_default_2);
+
+        // Custom root folder check + writable directory validation
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let custom_root = std::env::temp_dir().join(format!("bh_custom_shot_{}", unique));
+        validate_writable_directory(&custom_root).unwrap();
+        let custom_setting = UserSetting {
+            auto_save_image: true,
+            screenshot_save_dir: Some(custom_root.to_string_lossy().to_string()),
+            ..UserSetting::default()
+        };
+        let out_custom = resolve_screenshot_output_path(
+            &custom_setting,
+            Some(r"D:\repo\mdw_corepkgmaster-batch"),
+            r"D:\repo\mdw_corepkgmaster-batch\target\batch\batfiles\Job01.bat",
+        );
+        assert_eq!(
+            out_custom,
+            custom_root.join("mdw_corepkgmaster-batch").join("Job01.png")
+        );
+
+        let _ = std::fs::remove_dir_all(&custom_root);
+    }
+
+    #[test]
+    fn test_powershell_auto_save_image_script() {
+        use crate::modules::app_config::UserSetting;
+
+        // Clipboard OFF, Auto Save Image ON -> prompt hook active, saves PNG, no Clipboard call
+        let save_only_setting = UserSetting {
+            ps_window_width: 1024,
+            ps_window_height: 680,
+            auto_capture_clipboard: false,
+            auto_save_image: true,
+            screenshot_save_dir: Some(r"C:\shots".to_string()),
+        };
+        let s1 = build_powershell_run_script(
+            r"C:\proj\target\batch\batfiles",
+            "MSTB590021.bat",
+            &save_only_setting,
+            Some(r"C:\shots\proj\MSTB590021.png"),
+            Some(r"C:\temp\status.txt"),
+        );
+        assert!(s1.contains("function global:prompt"));
+        assert!(s1.contains("MSTB590021.png"));
+        assert!(s1.contains("[System.Drawing.Imaging.ImageFormat]::Png"));
+        assert!(!s1.contains("Clipboard"));
+
+        // Sequential group step script contains output + metadata + PNG save + centered MoveWindow
+        let g1 = build_powershell_group_step_script(
+            r"C:\proj\target\batch\batfiles",
+            "MSTB590022.bat",
+            &save_only_setting,
+            r"C:\shots\proj\MSTB590022.png",
+            r"C:\temp\out.txt",
+            r"C:\temp\meta.json",
+        );
+        assert!(g1.contains("MSTB590022.png"));
+        assert!(g1.contains("screenshot_saved"));
+        assert!(g1.contains("PrimaryScreen.WorkingArea"));
+        assert!(g1.contains("MoveWindow"));
+    }
+
+    #[test]
+    fn test_execute_bat_group_step_missing_file_not_skipped() {
+        let missing_path = r"C:\__bh_nonexistent_dir__\missing_batch_001.bat";
+        let default_setting = crate::modules::app_config::UserSetting::default();
+        let res = execute_bat_group_step_with_setting(missing_path, None, &default_setting);
+        assert!(!res.success);
+        assert_eq!(res.name, "missing_batch_001.bat");
+        assert!(res.error_message.unwrap_or_default().contains("does not exist"));
+        assert!(!res.screenshot_saved);
+    }
+
+    #[test]
+    fn test_auto_save_image_default_off_and_off_produces_no_png() {
+        use crate::modules::app_config::*;
+
+        let defaults = UserSetting::default();
+        assert!(!defaults.auto_save_image);
+
+        // Relative screenshot_save_dir must anchor to setting.json directory, NEVER process CWD
+        let rel_setting = UserSetting {
+            auto_save_image: true,
+            screenshot_save_dir: Some("my_relative_shots".to_string()),
+            ..UserSetting::default()
+        };
+        let setting_dir = get_setting_file_path().parent().unwrap().to_path_buf();
+        assert_eq!(
+            resolve_screenshot_root_dir(&rel_setting),
+            setting_dir.join("my_relative_shots")
+        );
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!("bh_off_{}", unique));
+        let proj_dir = base.join("off_proj");
+        let bat_dir = proj_dir.join("target").join("batch").join("batfiles");
+        let shot_root = base.join("never_created_shots");
+        std::fs::create_dir_all(&bat_dir).unwrap();
+        let bat_file = bat_dir.join("OffJob.bat");
+        std::fs::write(&bat_file, "@echo off\r\necho OFF_TEST\r\nexit /b 0\r\n").unwrap();
+
+        let off_setting = UserSetting {
+            auto_capture_clipboard: false,
+            auto_save_image: false,
+            screenshot_save_dir: Some(shot_root.to_string_lossy().to_string()),
+            ..UserSetting::default()
+        };
+
+        let res = execute_bat_group_step_with_setting(
+            &bat_file.to_string_lossy(),
+            Some(&proj_dir.to_string_lossy()),
+            &off_setting,
+        );
+        assert!(res.success);
+        assert_eq!(res.exit_code, Some(0));
+        assert!(!res.screenshot_saved);
+        assert!(res.screenshot_path.is_none());
+        assert!(!shot_root.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_auto_save_image_physical_png_creation_missing_dir_and_overwrite() {
+        use crate::modules::app_config::UserSetting;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!("bh_png_real_{}", unique));
+        let proj_dir = base
+            .join("OneDrive - \u{682a}\u{5f0f}\u{4f1a}\u{793e}")
+            .join("demo_proj");
+        let bat_dir = proj_dir.join("target").join("batch").join("batfiles");
+        let missing_shot_root = base.join("missing_parent").join("image_root");
+        std::fs::create_dir_all(&bat_dir).unwrap();
+
+        let bat_file = bat_dir.join("JobAlpha.bat");
+        std::fs::write(&bat_file, "@echo off\r\necho FIRST_RUN_OK\r\nexit 0\r\n").unwrap();
+
+        let on_setting = UserSetting {
+            ps_window_width: 900,
+            ps_window_height: 540,
+            auto_capture_clipboard: false,
+            auto_save_image: true,
+            screenshot_save_dir: Some(missing_shot_root.to_string_lossy().to_string()),
+        };
+
+        // Run 1: destination folder does not exist yet -> auto-created + physical PNG created
+        let res1 = execute_bat_group_step_with_setting(
+            &bat_file.to_string_lossy(),
+            Some(&proj_dir.to_string_lossy()),
+            &on_setting,
+        );
+        assert!(res1.success, "Expected step1 success: {:?}", res1);
+        assert_eq!(res1.exit_code, Some(0));
+        assert!(
+            res1.screenshot_saved,
+            "Expected PNG to be saved physically, err: {:?}",
+            res1.screenshot_error
+        );
+        assert!(res1.screenshot_error.is_none());
+
+        let expected_png = missing_shot_root.join("demo_proj").join("JobAlpha.png");
+        assert!(expected_png.is_file(), "PNG not found at {:?}", expected_png);
+        let png_bytes_1 = std::fs::read(&expected_png).unwrap();
+        assert!(png_bytes_1.len() > 500);
+        assert_eq!(
+            &png_bytes_1[..8],
+            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        );
+
+        // Run 2: same filename already exists -> must overwrite cleanly with zero duplicate files
+        std::fs::write(
+            &bat_file,
+            "@echo off\r\necho SECOND_RUN_OVERWRITE_CONTENT_LINE\r\necho LINE_2\r\nexit 0\r\n",
+        )
+        .unwrap();
+        let res2 = execute_bat_group_step_with_setting(
+            &bat_file.to_string_lossy(),
+            Some(&proj_dir.to_string_lossy()),
+            &on_setting,
+        );
+        assert!(res2.success);
+        assert!(res2.screenshot_saved, "Overwrite failed: {:?}", res2.screenshot_error);
+
+        let png_bytes_2 = std::fs::read(&expected_png).unwrap();
+        assert!(png_bytes_2.len() > 500);
+        assert_eq!(
+            &png_bytes_2[..8],
+            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        );
+        let entries_in_proj_shots: Vec<_> = std::fs::read_dir(missing_shot_root.join("demo_proj"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries_in_proj_shots.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_auto_save_image_individual_run_physical_png_and_jp_path() {
+        use crate::modules::app_config::{resolve_screenshot_output_path, UserSetting};
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!("bh_single_run_{}", unique));
+        let proj_dir = base
+            .join("OneDrive - \u{682a}\u{5f0f}\u{4f1a}\u{793e}")
+            .join("single_proj");
+        let bat_dir = proj_dir.join("target").join("batch").join("batfiles");
+        let shot_root = base.join("single_shots");
+        std::fs::create_dir_all(&bat_dir).unwrap();
+
+        let bat_file = bat_dir.join("SingleRunJob.bat");
+        std::fs::write(&bat_file, "@echo off\r\necho SINGLE_RUN_OK\r\nexit 0\r\n").unwrap();
+
+        let on_setting = UserSetting {
+            ps_window_width: 920,
+            ps_window_height: 540,
+            auto_capture_clipboard: false,
+            auto_save_image: true,
+            screenshot_save_dir: Some(shot_root.to_string_lossy().to_string()),
+        };
+
+        let target_png = resolve_screenshot_output_path(
+            &on_setting,
+            Some(&proj_dir.to_string_lossy()),
+            &bat_file.to_string_lossy(),
+        );
+        std::fs::create_dir_all(target_png.parent().unwrap()).unwrap();
+        let status_file = base.join("single_meta.json");
+
+        let raw_script = build_powershell_run_script(
+            &bat_dir.to_string_lossy(),
+            "SingleRunJob.bat",
+            &on_setting,
+            Some(&target_png.to_string_lossy()),
+            Some(&status_file.to_string_lossy()),
+        );
+        let ps1_path = allocate_temp_ps1_path("bh_test_single");
+        let full_script = append_ps1_self_cleanup(&raw_script, &ps1_path);
+        write_ps1_with_bom(&ps1_path, &full_script).unwrap();
+
+        let ps1_str = ps1_path.to_string_lossy().to_string();
+        let mut child = spawn_conhost_powershell(
+            &bat_dir,
+            &[
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-NoExit",
+                "-STA",
+                "-File",
+                &ps1_str,
+            ],
+        )
+        .expect("Failed to start conhost PowerShell for single run test");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !status_file.is_file() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(status_file.is_file(), "Single-run metadata JSON was never written");
+        let meta_txt = std::fs::read_to_string(&status_file).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(meta_txt.trim_start_matches('\u{feff}').trim()).unwrap();
+        assert_eq!(parsed["exit_code"].as_i64(), Some(0));
+        assert_eq!(parsed["screenshot_saved"].as_bool(), Some(true));
+        assert!(parsed["screenshot_error"].is_null());
+        assert!(target_png.is_file(), "Single-run PNG missing: {:?}", target_png);
+        let png_bytes = std::fs::read(&target_png).unwrap();
+        assert!(png_bytes.len() > 500);
+        assert_eq!(
+            &png_bytes[..8],
+            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        );
+        assert!(!ps1_path.exists(), "Temp .ps1 script should self-clean");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_auto_save_image_failure_does_not_corrupt_bat_result() {
+        use crate::modules::app_config::UserSetting;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!("bh_shot_err_{}", unique));
+        let proj_dir = base.join("err_proj");
+        std::fs::create_dir_all(&proj_dir).unwrap();
+
+        // Point screenshot_save_dir at a regular file so directory creation fails cleanly
+        let blocking_file = base.join("not_a_directory.txt");
+        std::fs::write(&blocking_file, b"blocker").unwrap();
+
+        let bat_file = proj_dir.join("HealthyJob.bat");
+        std::fs::write(&bat_file, "@echo off\r\necho BAT_STILL_OK\r\nexit /b 0\r\n").unwrap();
+
+        let bad_shot_setting = UserSetting {
+            auto_capture_clipboard: false,
+            auto_save_image: true,
+            screenshot_save_dir: Some(blocking_file.to_string_lossy().to_string()),
+            ..UserSetting::default()
+        };
+
+        let res = execute_bat_group_step_with_setting(
+            &bat_file.to_string_lossy(),
+            Some(&proj_dir.to_string_lossy()),
+            &bad_shot_setting,
+        );
+        assert!(res.success);
+        assert_eq!(res.exit_code, Some(0));
+        assert!(res.stdout.contains("BAT_STILL_OK"));
+        assert!(!res.screenshot_saved);
+        assert!(res.screenshot_error.is_some());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_sequential_run_all_continues_after_failure_with_auto_save_image() {
+        use crate::modules::app_config::UserSetting;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!("bh_run_all_{}", unique));
+        let proj_dir = base.join("batch_suite_proj");
+        let bat_dir = proj_dir.join("target").join("batch").join("batfiles");
+        let shot_root = base.join("suite_shots");
+        std::fs::create_dir_all(&bat_dir).unwrap();
+
+        let bat1 = bat_dir.join("01_Pass.bat");
+        let bat2 = bat_dir.join("02_Fail.bat");
+        let bat3 = bat_dir.join("03_PassAfterFail.bat");
+        std::fs::write(&bat1, "@echo off\r\necho STEP1_OK\r\nexit 0\r\n").unwrap();
+        std::fs::write(&bat2, "@echo off\r\necho STEP2_FAIL\r\nexit 2\r\n").unwrap();
+        std::fs::write(&bat3, "@echo off\r\necho STEP3_OK\r\nexit 0\r\n").unwrap();
+
+        let on_setting = UserSetting {
+            ps_window_width: 880,
+            ps_window_height: 520,
+            auto_capture_clipboard: false,
+            auto_save_image: true,
+            screenshot_save_dir: Some(shot_root.to_string_lossy().to_string()),
+        };
+
+        let results: Vec<_> = [&bat1, &bat2, &bat3]
+            .iter()
+            .map(|b| {
+                execute_bat_group_step_with_setting(
+                    &b.to_string_lossy(),
+                    Some(&proj_dir.to_string_lossy()),
+                    &on_setting,
+                )
+            })
+            .collect();
+
+        assert!(results[0].success && results[0].screenshot_saved);
+        assert!(!results[1].success && results[1].exit_code == Some(2) && results[1].screenshot_saved);
+        assert!(results[2].success && results[2].screenshot_saved);
+
+        for name in ["01_Pass.png", "02_Fail.png", "03_PassAfterFail.png"] {
+            let p = shot_root.join("batch_suite_proj").join(name);
+            assert!(p.is_file(), "Missing sequential screenshot: {:?}", p);
+            let bytes = std::fs::read(&p).unwrap();
+            assert_eq!(&bytes[..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_normalize_project_path_equivalence() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let raw_base = std::env::temp_dir().join(format!("bh_norm_tab_{}", unique));
+        let proj = raw_base.join("space proj").join("my-batch-project");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        let canonical = normalize_project_path(&proj.to_string_lossy());
+        let forward_slash = normalize_project_path(&format!(
+            "\"{}\\\\\"",
+            proj.to_string_lossy().replace('\\', "/")
+        ));
+        let upper_case = normalize_project_path(&proj.to_string_lossy().to_uppercase());
+        let dot_dot = normalize_project_path(&format!(
+            "{}\\..\\my-batch-project\\.",
+            proj.to_string_lossy()
+        ));
+        let short_form = normalize_project_path(&to_batch_safe_path(&proj.to_string_lossy()));
+
+        assert!(!canonical.key.is_empty());
+        assert_eq!(canonical.key, forward_slash.key);
+        assert_eq!(canonical.key, upper_case.key);
+        assert_eq!(canonical.key, dot_dot.key);
+        assert_eq!(canonical.key, short_form.key);
+
+        let _ = std::fs::remove_dir_all(&raw_base);
+    }
+
+    #[test]
+    fn test_clear_target_log_files_strict_and_safe() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!("bh_clear_logs_{}", unique));
+        let proj = base.join("sample_proj");
+        let target_log = proj.join("target").join("log");
+        let source_log = proj.join("log");
+        let bat_dir = proj.join("target").join("batch").join("batfiles");
+        std::fs::create_dir_all(&target_log).unwrap();
+        std::fs::create_dir_all(&source_log).unwrap();
+        std::fs::create_dir_all(&bat_dir).unwrap();
+
+        let log1 = target_log.join("batch.log");
+        let log2 = target_log.join("stclibApp.log");
+        let keep_src_log = source_log.join("keep.log");
+        let keep_bat = bat_dir.join("KeepMe.bat");
+        std::fs::write(&log1, "line 1\nline 2\nline 3\n").unwrap();
+        std::fs::write(&log2, "app log line A\napp log line B\n").unwrap();
+        std::fs::write(&keep_src_log, "DO_NOT_CLEAR_SOURCE_LOG").unwrap();
+        std::fs::write(&keep_bat, "@echo off\r\necho KEEP_BAT\r\n").unwrap();
+
+        let res = clear_target_log_files(
+            Some(&proj.to_string_lossy()),
+            None,
+            None,
+            Some("batch.log"),
+            Some("stclibApp.log"),
+        )
+        .unwrap();
+
+        assert!(res.failed_files.is_empty());
+        assert_eq!(res.cleared_files.len(), 2);
+        assert_eq!(std::fs::metadata(&log1).unwrap().len(), 0);
+        assert_eq!(std::fs::metadata(&log2).unwrap().len(), 0);
+        assert_eq!(
+            std::fs::read_to_string(&keep_src_log).unwrap(),
+            "DO_NOT_CLEAR_SOURCE_LOG"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&keep_bat).unwrap(),
+            "@echo off\r\necho KEEP_BAT\r\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_powershell_dual_monitor_centering_and_physical_png_with_clipboard() {
+        use crate::modules::app_config::UserSetting;
+
+        let setting_both = UserSetting {
+            ps_window_width: 1130,
+            ps_window_height: 676,
+            auto_capture_clipboard: true,
+            auto_save_image: true,
+            screenshot_save_dir: Some(r"C:\shots".to_string()),
+        };
+        let mon_script = build_powershell_run_script_on_monitor(
+            r"C:\proj\target\batch\batfiles",
+            "CenterTest.bat",
+            &setting_both,
+            Some(r"C:\shots\proj\CenterTest.png"),
+            Some(r"C:\temp\meta.json"),
+            Some((2880, 540)),
+        );
+        assert!(mon_script.contains("MonitorFromPoint"));
+        assert!(mon_script.contains("GetMonitorInfoW"));
+        assert!(mon_script.contains("2880"));
+        assert!(mon_script.contains("540"));
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!("bh_mon_png_{}", unique));
+        let proj = base.join("dual_mon_proj");
+        let bat_dir = proj.join("target").join("batch").join("batfiles");
+        let shot_root = base.join("shots");
+        std::fs::create_dir_all(&bat_dir).unwrap();
+        let bat_file = bat_dir.join("DualMonJob.bat");
+        std::fs::write(&bat_file, "@echo off\r\necho DUAL_MON_PNG_OK\r\nexit 0\r\n").unwrap();
+
+        let live_setting = UserSetting {
+            ps_window_width: 1130,
+            ps_window_height: 676,
+            auto_capture_clipboard: true,
+            auto_save_image: true,
+            screenshot_save_dir: Some(shot_root.to_string_lossy().to_string()),
+        };
+
+        let res = execute_bat_group_step_with_setting_on_monitor(
+            &bat_file.to_string_lossy(),
+            Some(&proj.to_string_lossy()),
+            &live_setting,
+            Some((960, 540)),
+        );
+        assert!(res.success, "Expected DualMonJob success: {:?}", res);
+        assert!(
+            res.screenshot_saved,
+            "Expected PNG with clipboard+save both ON: {:?}",
+            res.screenshot_error
+        );
+        let expected_png = shot_root.join("dual_mon_proj").join("DualMonJob.png");
+        assert!(expected_png.is_file());
+        let png_bytes = std::fs::read(&expected_png).unwrap();
+        assert!(png_bytes.len() > 500);
+        assert_eq!(&png_bytes[..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

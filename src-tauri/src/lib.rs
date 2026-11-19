@@ -3,14 +3,15 @@ pub mod modules;
 use modules::ant_manager::{self, AntScanResult, AntTestResult, ExtractAntResult};
 use modules::app_config::{self, UserSetting};
 use modules::builder::{
-    self, AutoConfigResult, BatFileInfo, BatGroupStepResult, BuildResult, PostBuildInspection,
+    self, AutoConfigResult, BatFileInfo, BatGroupStepResult, BatLaunchResult, BuildResult,
+    ClearLogsResult, PostBuildInspection,
 };
 use modules::db_manager::{self, DatabaseConfigInfo, DatabaseTestResult};
 use modules::encoding;
 use modules::environment::{self, CommandExecutionResult, SystemEnvironmentInfo};
 use modules::jdk_manager::{self, JavaTestResult, JdkScanResult};
 use modules::project::{self, ProjectScanResult};
-use modules::settings::{self, AppSettings};
+use modules::settings::{self, AppSettings, BatchGroup, NormalizedProjectPath};
 use serde::Serialize;
 use std::path::Path;
 use tauri::{AppHandle, Emitter, Manager};
@@ -257,11 +258,39 @@ async fn open_file_in_text_editor(path: String) -> Result<String, String> {
     builder::open_file_with_default_text_editor(&path)
 }
 
+fn resolve_main_window_anchor(app: &AppHandle) -> Option<(i32, i32)> {
+    let main_win = app.get_webview_window("main")?;
+    if let (Ok(pos), Ok(size)) = (main_win.outer_position(), main_win.outer_size()) {
+        if size.width > 0 && size.height > 0 {
+            return Some((
+                pos.x + (size.width as i32) / 2,
+                pos.y + (size.height as i32) / 2,
+            ));
+        }
+    }
+    if let Ok(Some(mon)) = main_win.current_monitor() {
+        let m_pos = mon.position();
+        let m_size = mon.size();
+        return Some((
+            m_pos.x + (m_size.width as i32) / 2,
+            m_pos.y + (m_size.height as i32) / 2,
+        ));
+    }
+    None
+}
+
 #[tauri::command]
-async fn execute_bat_group_step(path: String) -> Result<BatGroupStepResult, String> {
-    tauri::async_runtime::spawn_blocking(move || builder::execute_bat_group_step(&path))
-        .await
-        .map_err(|e| format!("Task join error: {}", e))
+async fn execute_bat_group_step(
+    app: AppHandle,
+    path: String,
+    project_path: Option<String>,
+) -> Result<BatGroupStepResult, String> {
+    let anchor = resolve_main_window_anchor(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        builder::execute_bat_group_step(&path, project_path.as_deref(), anchor)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))
 }
 
 #[tauri::command]
@@ -314,8 +343,91 @@ async fn open_file_log(
 }
 
 #[tauri::command]
-async fn execute_bat_file(path: String) -> Result<(), String> {
-    builder::execute_bat_in_powershell(&path)
+async fn clear_target_logs(
+    project_path: Option<String>,
+    target: Option<String>,
+    log_folder_path: Option<String>,
+    batch_log_name: Option<String>,
+    app_log_name: Option<String>,
+) -> Result<ClearLogsResult, String> {
+    builder::clear_target_log_files(
+        project_path.as_deref(),
+        target.as_deref(),
+        log_folder_path.as_deref(),
+        batch_log_name.as_deref(),
+        app_log_name.as_deref(),
+    )
+}
+
+#[tauri::command]
+async fn execute_bat_file(
+    app: AppHandle,
+    tab_id: Option<String>,
+    path: String,
+    project_path: Option<String>,
+) -> Result<BatLaunchResult, String> {
+    let anchor = resolve_main_window_anchor(&app);
+    builder::execute_bat_in_powershell(Some(app), tab_id.as_deref(), &path, project_path.as_deref(), anchor)
+}
+
+#[tauri::command]
+async fn open_screenshot_directory(custom_dir: Option<String>) -> Result<String, String> {
+    let mut setting = app_config::load_user_setting();
+    if let Some(dir) = custom_dir {
+        let trimmed = dir.trim().trim_matches('"').to_string();
+        setting.screenshot_save_dir = if trimmed.is_empty() { None } else { Some(trimmed) };
+    }
+    let root = app_config::resolve_screenshot_root_dir(&setting);
+    app_config::validate_writable_directory(&root)?;
+    let root_str = root.to_string_lossy().replace('/', "\\");
+    std::process::Command::new("explorer")
+        .arg(&root_str)
+        .spawn()
+        .map_err(|e| format!("Failed to open screenshot directory: {}", e))?;
+    Ok(root_str)
+}
+
+#[tauri::command]
+async fn get_project_groups(project_path: String) -> Result<Vec<BatchGroup>, String> {
+    Ok(settings::get_project_groups(&project_path))
+}
+
+#[tauri::command]
+async fn create_batch_group(
+    project_path: String,
+    name: String,
+    files: Vec<String>,
+) -> Result<Vec<BatchGroup>, String> {
+    settings::create_batch_group(&project_path, &name, files)
+}
+
+#[tauri::command]
+async fn add_files_to_batch_group(
+    project_path: String,
+    group_id: String,
+    files: Vec<String>,
+) -> Result<Vec<BatchGroup>, String> {
+    settings::add_files_to_batch_group(&project_path, &group_id, files)
+}
+
+#[tauri::command]
+async fn delete_batch_group(
+    project_path: String,
+    group_id: String,
+) -> Result<Vec<BatchGroup>, String> {
+    settings::delete_batch_group(&project_path, &group_id)
+}
+
+#[tauri::command]
+async fn get_default_screenshot_dir() -> Result<String, String> {
+    Ok(app_config::get_default_screenshot_root_dir()
+        .to_string_lossy()
+        .to_string())
+}
+
+#[tauri::command]
+async fn normalize_project_path(path: String) -> Result<NormalizedProjectPath, String> {
+    Ok(settings::normalize_project_path(&path))
 }
 
 #[tauri::command]
@@ -514,7 +626,15 @@ pub fn run() {
             scan_custom_bat_dir,
             open_path_in_explorer,
             open_file_log,
+            clear_target_logs,
             execute_bat_file,
+            open_screenshot_directory,
+            get_project_groups,
+            create_batch_group,
+            add_files_to_batch_group,
+            delete_batch_group,
+            get_default_screenshot_dir,
+            normalize_project_path,
             open_cmd_size_picker,
             ready_cmd_size_picker,
             get_cmd_size_picker_dimensions,

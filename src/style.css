@@ -80,6 +80,10 @@ input[type="submit"]:disabled {
     margin: 0 !important;
     padding: 6px 8px !important;
     box-sizing: border-box;
+    min-width: 0;
+    min-inline-size: 0;
+    width: 100%;
+    max-width: 100%;
   }
 
   .win95-box legend {
@@ -90,23 +94,25 @@ input[type="submit"]:disabled {
   }
 
   /* ==========================================================================
-   0. MULTI-PROJECT TABS BAR (WIN95 TAB STRIP)
+   0. MULTI-PROJECT TABS BAR
    ========================================================================== */
 .project-tabs-bar {
   display: flex;
-  align-items: flex-end;
-  gap: 4px;
+  align-items: center;
+  gap: 6px;
   flex-shrink: 0;
   border-bottom: 2px solid #ffffff;
-  padding-bottom: 1px;
+  padding-bottom: 2px;
+  min-width: 0;
 }
 
 .project-tabs-list {
   display: flex;
   align-items: flex-end;
   gap: 2px;
+  flex: 1 1 0;
+  min-width: 0;
   overflow-x: auto;
-  max-width: calc(100% - 95px);
 }
 
 .project-tab {
@@ -186,6 +192,8 @@ input[type="submit"]:disabled {
     display: flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
+    width: 100%;
   }
 
   .toolbar-row:not(:last-child) {
@@ -206,8 +214,8 @@ input[type="submit"]:disabled {
   }
 
   .input-path {
-    flex: 1;
-    min-width: 160px;
+    flex: 1.2 1 200px;
+    min-width: 140px;
     height: 22px;
     padding: 2px 6px;
     font-size: 11px;
@@ -215,8 +223,9 @@ input[type="submit"]:disabled {
   }
 
   .select-history {
-    flex: 0.9;
-    min-width: 150px;
+    flex: 0.9 1 280px;
+    width: 0;
+    min-width: 140px;
     max-width: 340px;
     height: 22px;
     font-size: 11px;
@@ -226,10 +235,13 @@ input[type="submit"]:disabled {
   /* Custom Win95 History Dropdown with Delete ('x') per item */
   .win95-dropdown {
     position: relative;
+    min-width: 0;
+    max-width: 100%;
   }
 
   .win95-dropdown-trigger {
     width: 100%;
+    max-width: 100%;
     height: 22px !important;
     min-height: 22px !important;
     min-width: 0 !important;
@@ -238,6 +250,7 @@ input[type="submit"]:disabled {
     align-items: center;
     justify-content: space-between;
     gap: 4px;
+    overflow: hidden;
     background-color: #ffffff !important;
     box-shadow: inset 1px 1px #0a0a0a, inset -1px -1px #ffffff, inset 2px 2px #808080, inset -2px -2px #dfdfdf !important;
     font-size: 11px;
@@ -247,8 +260,10 @@ input[type="submit"]:disabled {
   }
 
   .win95-dropdown-label {
-    flex: 1;
+    display: block;
+    flex: 1 1 0;
     min-width: 0;
+    max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -272,10 +287,12 @@ input[type="submit"]:disabled {
     position: absolute;
     top: 23px;
     left: 0;
+    right: 0;
+    width: 100%;
     min-width: 100%;
-    width: max-content;
-    max-width: 520px;
+    max-width: 100%;
     max-height: 240px;
+    overflow-x: hidden;
     overflow-y: auto;
     background-color: #ffffff;
     border: 1px solid #000000;
@@ -289,9 +306,12 @@ input[type="submit"]:disabled {
     align-items: center;
     justify-content: space-between;
     gap: 6px;
+    width: 100%;
+    min-width: 0;
     padding: 3px 6px;
     cursor: pointer;
     border-bottom: 1px solid #f0f0f0;
+    box-sizing: border-box;
   }
 
   .history-item-row:last-child {
@@ -314,8 +334,10 @@ input[type="submit"]:disabled {
   }
 
   .history-item-text {
-    flex: 1;
+    display: block;
+    flex: 1 1 0;
     min-width: 0;
+    max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -543,6 +565,123 @@ input[type="submit"]:disabled {
         background-color: #9e9e9e;
       }
 
+      /* Saved Batch Groups Bar directly under Filter */
+      .bat-groups-bar {
+        display: flex;
+        align-items: flex-start;
+        gap: 6px;
+        margin-bottom: 4px;
+        padding: 3px 4px;
+        background-color: #d4d4d4;
+        border: 1px solid #808080;
+        box-shadow: inset 1px 1px #ffffff;
+        flex-shrink: 0;
+      }
+
+      .bat-groups-label {
+        font-size: 10.5px;
+        font-weight: bold;
+        color: #222222;
+        line-height: 20px;
+        flex-shrink: 0;
+      }
+
+      .bat-groups-list {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px;
+        max-height: 50px;
+        overflow-y: auto;
+      }
+
+      .group-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        height: 20px !important;
+        min-height: 20px !important;
+        min-width: auto !important;
+        padding: 0 6px !important;
+        font-size: 10.5px !important;
+        line-height: 18px;
+        background-color: var(--win-gray);
+        color: #000000;
+        cursor: pointer;
+        max-width: 190px;
+        box-sizing: border-box;
+      }
+
+      .group-chip.active {
+        background-color: #000080 !important;
+        color: #ffffff !important;
+        font-weight: bold;
+        box-shadow: inset 1px 1px #0a0a0a, inset -1px -1px #ffffff !important;
+      }
+
+      .group-chip.active .group-chip-name,
+      .group-chip.active .group-chip-count {
+        color: #ffffff !important;
+      }
+
+      .group-chip.active .group-chip-del {
+        background-color: #2f3b96;
+        border-color: #cfd8ff;
+        color: #ffffff !important;
+      }
+
+      .group-chip.active .group-chip-del:hover {
+        background-color: #cc0000;
+        color: #ffffff !important;
+      }
+
+      .group-chip:focus-visible {
+        outline: 1px dotted #000080;
+        outline-offset: 1px;
+      }
+
+      .group-chip-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 118px;
+      }
+
+      .group-chip-count {
+        font-size: 9.5px;
+        opacity: 0.9;
+        flex-shrink: 0;
+      }
+
+      .group-chip-del {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 13px;
+        height: 13px;
+        font-size: 9.5px;
+        line-height: 1;
+        font-weight: bold;
+        color: #333333;
+        background-color: #dfdfdf;
+        border: 1px solid #808080;
+        margin-left: 2px;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+
+      .group-chip-del:hover {
+        background-color: #cc0000;
+        color: #ffffff;
+      }
+
+      .bat-row-missing td {
+        color: #888888;
+        font-style: italic;
+      }
+
       .bat-preview-pane {
         flex: 1 1 0;
         min-width: 180px;
@@ -662,6 +801,11 @@ input[type="submit"]:disabled {
         border: 1px solid #808080;
       }
 
+      #bat-table-container:focus {
+        outline: 1px dotted #000080;
+        outline-offset: -1px;
+      }
+
       .bat-table {
         width: 100%;
         table-layout: fixed;
@@ -701,10 +845,85 @@ input[type="submit"]:disabled {
         color: #000000;
       }
 
+      /* BAT Execution Status Highlighting (Light Theme) */
+      .bat-table tbody tr.bat-status-success,
+      .group-run-table tbody tr.bat-status-success {
+        background-color: #d7f5dc;
+        color: #0b3d14;
+      }
+      .bat-table tbody tr.bat-status-success:hover,
+      .group-run-table tbody tr.bat-status-success:hover {
+        background-color: #c2ecc9;
+        color: #0b3d14;
+      }
+
+      .bat-table tbody tr.bat-status-failed,
+      .group-run-table tbody tr.bat-status-failed {
+        background-color: #fadbd8;
+        color: #6e1111;
+      }
+      .bat-table tbody tr.bat-status-failed:hover,
+      .group-run-table tbody tr.bat-status-failed:hover {
+        background-color: #f4c2bd;
+        color: #6e1111;
+      }
+
+      .bat-table tbody tr.bat-status-pending,
+      .group-run-table tbody tr.bat-status-pending {
+        background-color: #fff3cd;
+        color: #5c4300;
+      }
+      .bat-table tbody tr.bat-status-pending:hover,
+      .group-run-table tbody tr.bat-status-pending:hover {
+        background-color: #ffe69c;
+        color: #5c4300;
+      }
+
+      .bat-table tbody tr.bat-status-running,
+      .group-run-table tbody tr.bat-status-running {
+        background-color: #d6eaf8;
+        color: #0a3254;
+        box-shadow: inset 4px 0 0 #0284c7;
+      }
+      .bat-table tbody tr.bat-status-running:hover,
+      .group-run-table tbody tr.bat-status-running:hover {
+        background-color: #bee0f7;
+        color: #0a3254;
+      }
+
+      /* Selection highlight preserved alongside execution status accent */
       .bat-table tbody tr.selected-row,
       .bat-table tbody tr.selected-row:hover {
         background-color: #000080;
         color: #ffffff;
+      }
+
+      .bat-table tbody tr.selected-row.bat-status-success,
+      .bat-table tbody tr.selected-row.bat-status-success:hover {
+        background-color: #000080;
+        color: #ffffff;
+        box-shadow: inset 5px 0 0 #22c55e;
+      }
+
+      .bat-table tbody tr.selected-row.bat-status-failed,
+      .bat-table tbody tr.selected-row.bat-status-failed:hover {
+        background-color: #000080;
+        color: #ffffff;
+        box-shadow: inset 5px 0 0 #ef4444;
+      }
+
+      .bat-table tbody tr.selected-row.bat-status-pending,
+      .bat-table tbody tr.selected-row.bat-status-pending:hover {
+        background-color: #000080;
+        color: #ffffff;
+        box-shadow: inset 5px 0 0 #f59e0b;
+      }
+
+      .bat-table tbody tr.selected-row.bat-status-running,
+      .bat-table tbody tr.selected-row.bat-status-running:hover {
+        background-color: #000080;
+        color: #ffffff;
+        box-shadow: inset 5px 0 0 #38bdf8;
       }
 
       .bat-table tbody tr.selected-row td {
@@ -717,11 +936,127 @@ input[type="submit"]:disabled {
       }
 
       .file-name-cell {
-        display: block;
+        display: flex;
+        align-items: center;
+        gap: 4px;
         width: 100%;
+        min-width: 0;
+        overflow: hidden;
+      }
+
+      .file-name-text {
+        flex: 1 1 0;
+        min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+
+      .bat-status-tag {
+        display: inline-block;
+        padding: 0 4px;
+        font-size: 9px;
+        font-weight: bold;
+        line-height: 14px;
+        border-radius: 1px;
+        flex-shrink: 0;
+        text-transform: uppercase;
+      }
+
+      .bat-tag-success {
+        background-color: #16a34a;
+        color: #ffffff;
+      }
+
+      .bat-tag-failed {
+        background-color: #dc2626;
+        color: #ffffff;
+      }
+
+      .bat-tag-pending {
+        background-color: #d97706;
+        color: #ffffff;
+      }
+
+      .bat-tag-running {
+        background-color: #0284c7;
+        color: #ffffff;
+      }
+
+      /* Dark Theme BAT Table & Readable Status Colors */
+      #bat-table-container.theme-dark {
+        background-color: #1e1e1e;
+        border-color: #555555;
+      }
+
+      #bat-table-container.theme-dark .bat-table {
+        background-color: #1e1e1e;
+        color: #e5e5e5;
+      }
+
+      #bat-table-container.theme-dark .bat-table td {
+        border-bottom-color: #333333;
+        color: #e5e5e5;
+      }
+
+      #bat-table-container.theme-dark .bat-table tbody tr:hover {
+        background-color: #2d3748;
+        color: #ffffff;
+      }
+
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-success {
+        background-color: #173a22;
+        color: #b7f5c4;
+      }
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-success td {
+        color: #b7f5c4;
+      }
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-success:hover {
+        background-color: #1f4f2e;
+      }
+
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-failed {
+        background-color: #461a1a;
+        color: #fecaca;
+      }
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-failed td {
+        color: #fecaca;
+      }
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-failed:hover {
+        background-color: #5e2222;
+      }
+
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-pending {
+        background-color: #423412;
+        color: #fde68a;
+      }
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-pending td {
+        color: #fde68a;
+      }
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-pending:hover {
+        background-color: #574518;
+      }
+
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-running {
+        background-color: #15344f;
+        color: #bae6fd;
+        box-shadow: inset 4px 0 0 #38bdf8;
+      }
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-running td {
+        color: #bae6fd;
+      }
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-running:hover {
+        background-color: #1b4569;
+      }
+
+      #bat-table-container.theme-dark .bat-table tbody tr.selected-row,
+      #bat-table-container.theme-dark .bat-table tbody tr.selected-row:hover {
+        background-color: #000080;
+        color: #ffffff;
+      }
+
+      #bat-table-container.theme-dark .empty-row {
+        color: #a3a3a3;
       }
 
       .file-icon {
@@ -745,15 +1080,31 @@ input[type="submit"]:disabled {
       }
 
       /* ==========================================================================
-   3. FOOTER / STATUS BAR (COMPACT & CLICKABLE)
+   3. FOOTER / STATUS BAR (COMPACT, CLICKABLE & VERTICALLY CENTERED)
    ========================================================================== */
       .app-footer-bar {
         flex-shrink: 0;
         height: 24px;
         margin-top: 0;
+        width: 100%;
+        max-width: 100%;
         display: flex;
         align-items: stretch;
+        gap: 2px;
         padding: 1px;
+        overflow: hidden;
+        box-sizing: border-box;
+      }
+
+      .app-footer-bar > .status-bar-field {
+        display: flex;
+        align-items: center;
+        min-width: 0;
+        height: 100%;
+        margin: 0 !important;
+        overflow: hidden;
+        box-sizing: border-box;
+        line-height: 1;
       }
 
       .footer-clickable {
@@ -778,15 +1129,17 @@ input[type="submit"]:disabled {
 
       .footer-label {
         font-size: 10.5px;
+        line-height: 1;
         flex-shrink: 0;
       }
 
       .footer-val {
         font-size: 10.5px;
+        line-height: 1.15;
       }
 
       .footer-clickable .footer-val {
-        flex: 1;
+        flex: 1 1 0;
         min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -809,38 +1162,94 @@ input[type="submit"]:disabled {
       }
 
       #footer-ant-btn {
-        flex: 0 0 155px;
+        flex: 0 1 138px;
+        min-width: 88px;
       }
 
       #footer-java-btn {
-        flex: 0 0 165px;
+        flex: 0 1 142px;
+        min-width: 90px;
       }
 
       #footer-db-btn {
-        flex: 0 0 215px;
+        flex: 0 1 180px;
+        min-width: 96px;
       }
 
       #footer-config-btn {
-        flex: 0 0 148px;
+        flex: 0 1 196px;
+        min-width: 118px;
       }
 
       .footer-settings {
-        flex: 1;
-        min-width: 80px;
+        flex: 1 1 110px;
+        min-width: 60px;
         display: flex;
         align-items: center;
         gap: 4px;
         padding: 0 8px !important;
+        overflow: hidden;
+      }
+
+      #footer-settings-val {
+        display: block;
+        flex: 1 1 0;
+        min-width: 0;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .footer-pill {
-        width: auto;
-        min-width: 100px;
         flex: 0 0 auto;
+        width: auto;
+        min-width: 196px;
+        max-width: 280px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         padding: 0 8px !important;
         text-align: center;
         font-weight: bold;
         white-space: nowrap;
+        overflow: hidden;
+      }
+
+      #footer-status-text {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        line-height: 1;
+        font-size: 10.5px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .footer-status-label {
+        font-weight: bold;
+        white-space: nowrap;
+      }
+
+      .footer-status-label.status-ok {
+        color: #006600;
+      }
+
+      .footer-status-label.status-err {
+        color: #aa0000;
+      }
+
+      .footer-status-time {
+        font-family: "Consolas", "Courier New", monospace !important;
+        font-size: 10px;
+        font-weight: normal;
+        color: #333333;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
       }
 
       /* ==========================================================================
@@ -933,6 +1342,12 @@ input[type="submit"]:disabled {
 
       .modal-large {
         width: 680px;
+        max-width: 94vw;
+        box-sizing: border-box;
+      }
+
+      .modal-settings-window {
+        width: 660px;
         max-width: 94vw;
         box-sizing: border-box;
       }
@@ -1033,6 +1448,10 @@ input[type="submit"]:disabled {
         display: flex;
         align-items: center;
         gap: 8px;
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
         margin-top: 8px;
         padding: 5px 8px;
         background-color: #dfdfdf;
@@ -1044,7 +1463,37 @@ input[type="submit"]:disabled {
 
       .setting-toggle-text {
         flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
         font-weight: bold;
+      }
+
+      .setting-path-row {
+        min-width: 0;
+        max-width: 100%;
+      }
+
+      .setting-path-label {
+        width: 38px !important;
+        flex-shrink: 0;
+      }
+
+      .setting-path-input {
+        flex: 1 1 0;
+        width: 0;
+        min-width: 0;
+        max-width: 100%;
+        height: 23px;
+      }
+
+      .setting-path-row .btn-sm {
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+
+      .path-scroll-box.modal-desc-note {
+        padding: 3px 6px;
       }
 
       .group-run-table-wrap {
@@ -1087,6 +1536,41 @@ input[type="submit"]:disabled {
       .group-run-table tbody tr.selected-row {
         background-color: #000080;
         color: #ffffff;
+      }
+
+      /* Add Group Modal Styles */
+      .add-group-files-box {
+        max-height: 110px;
+        overflow-y: auto;
+        padding: 4px 6px;
+        background-color: #ffffff;
+        border: 1px solid #808080;
+        box-shadow: inset 1px 1px #0a0a0a, inset -1px -1px #ffffff;
+        line-height: 1.45;
+        user-select: text;
+      }
+
+      .add-group-mode-row {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .add-group-radio-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-weight: bold;
+        font-size: 11px;
+        cursor: pointer;
+      }
+
+      .add-group-error-box {
+        padding: 5px 8px;
+        background-color: #fff2f2;
+        border: 1px solid #cc0000;
+        color: #aa0000;
+        font-size: 11px;
       }
 
       /* Win95 Right-Click Context Menu */

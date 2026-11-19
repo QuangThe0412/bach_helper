@@ -3,7 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Batch Helper</title>
+    <title>BATCH HELPER</title>
+    <link rel="icon" type="image/svg+xml" href="./assets/batch-helper-logo.svg" />
     <link rel="stylesheet" href="./src/98.css" />
     <link rel="stylesheet" href="./src/style.css" />
   </head>
@@ -92,6 +93,9 @@
               <button id="btn-open-app-log" class="win95-btn btn-xs" title="Configured application log file" disabled>
                 App Log (N/A)
               </button>
+              <button id="btn-clear-all-log" class="win95-btn btn-xs" title="Clear all logs (target .log files and CMD console)" disabled>
+                Clear All Log
+              </button>
               <button id="btn-open-bat-dir" class="win95-btn btn-xs" title="Open batch folder in Windows Explorer" disabled>
                 Open Folder
               </button>
@@ -122,14 +126,20 @@
                   id="input-bat-filter"
                   type="text"
                   class="bar-input"
-                  placeholder="Search / filter .bat files by name..."
+                  placeholder="Filter by prefix (comma-separated, e.g. MSTB590021,MSTB590022)..."
                 />
                 <span id="meta-bat-selected" class="badge badge-blue" style="display: none;">0 sel</span>
                 <span id="meta-bat-count" class="badge badge-blue">0 files</span>
               </div>
 
-              <!-- Explorer Table (No Size Column, Supports Shift/Ctrl Multi-Select) -->
-              <div class="explorer-table-container">
+              <!-- Saved Batch Groups Bar (Project-scoped) -->
+              <div id="bat-groups-bar" class="bat-groups-bar" style="display: none;">
+                <span class="bat-groups-label">Groups:</span>
+                <div id="bat-groups-list" class="bat-groups-list"></div>
+              </div>
+
+              <!-- Explorer Table (No Size Column, Supports Shift/Ctrl/Ctrl+A Multi-Select) -->
+              <div id="bat-table-container" class="explorer-table-container" tabindex="0">
                 <table class="win95-table bat-table">
                   <thead>
                     <tr>
@@ -179,6 +189,9 @@
           <legend class="col-legend">
             <span>CMD</span>
             <div class="legend-actions">
+              <button id="btn-clear-cmd-log" class="win95-btn btn-xs" title="Clear CMD build and batch execution console output">
+                Clear All Log
+              </button>
               <button id="btn-expand-cmd" class="win95-btn btn-xs" title="Expand or restore CMD height">
                 Expand
               </button>
@@ -454,7 +467,7 @@
 
     <!-- MODAL 4: BAT RUN SETTINGS (setting.json) -->
     <div id="modal-settings" class="win95-modal-backdrop" style="display: none;">
-      <div class="window win95-modal-window modal-small">
+      <div class="window win95-modal-window modal-settings-window">
         <div class="title-bar">
           <div class="title-bar-text">BAT Run Settings</div>
           <div class="title-bar-controls">
@@ -462,31 +475,64 @@
           </div>
         </div>
         <div class="window-body modal-content-box">
-          <fieldset class="win95-box">
-            <legend><b>PowerShell Batch Window</b></legend>
-            <table class="modal-info-table">
-              <tr>
-                <td class="lbl">Window Width (px):</td>
-                <td>
-                  <input id="setting-ps-width" type="number" min="320" max="3840" step="10" class="setting-num-input" />
-                </td>
-              </tr>
-              <tr>
-                <td class="lbl">Window Height (px):</td>
-                <td>
-                  <input id="setting-ps-height" type="number" min="240" max="2160" step="10" class="setting-num-input" />
-                </td>
-              </tr>
-            </table>
-            <label class="setting-toggle-row" for="setting-auto-capture">
-              <input id="setting-auto-capture" type="checkbox" />
-              <span class="setting-toggle-text">Auto Screenshot Capture (Clipboard)</span>
-              <span id="setting-auto-capture-state" class="badge badge-green">ON</span>
-            </label>
-            <div id="modal-setting-file-desc" class="modal-desc-note text-mono text-muted path-scroll-box">
-              Config: setting.json
-            </div>
-          </fieldset>
+          <div class="modal-scroll-area">
+            <fieldset class="win95-box">
+              <legend><b>PowerShell Batch Window</b></legend>
+              <table class="modal-info-table">
+                <tr>
+                  <td class="lbl">Window Width (px):</td>
+                  <td>
+                    <input id="setting-ps-width" type="number" min="320" max="3840" step="10" class="setting-num-input" />
+                  </td>
+                </tr>
+                <tr>
+                  <td class="lbl">Window Height (px):</td>
+                  <td>
+                    <input id="setting-ps-height" type="number" min="240" max="2160" step="10" class="setting-num-input" />
+                  </td>
+                </tr>
+              </table>
+              <label class="setting-toggle-row" for="setting-auto-capture">
+                <input id="setting-auto-capture" type="checkbox" />
+                <span class="setting-toggle-text">Auto Screenshot Capture (Clipboard)</span>
+                <span id="setting-auto-capture-state" class="badge badge-green">ON</span>
+              </label>
+            </fieldset>
+
+            <fieldset class="win95-box" style="margin-top: 8px !important;">
+              <legend><b>Auto Save Image</b></legend>
+              <label class="setting-toggle-row" for="setting-auto-save-image" style="margin-top: 2px;">
+                <input id="setting-auto-save-image" type="checkbox" />
+                <span class="setting-toggle-text">Auto Save Image (PNG after BAT execution)</span>
+                <span id="setting-auto-save-image-state" class="badge badge-gray">OFF</span>
+              </label>
+              <div class="modal-choice-row setting-path-row" style="margin-top: 8px;">
+                <label for="setting-screenshot-dir" class="setting-path-label">Path:</label>
+                <input
+                  id="setting-screenshot-dir"
+                  type="text"
+                  class="bar-input setting-path-input"
+                  placeholder="Default: {setting.json folder}\\image"
+                />
+                <button type="button" id="modal-btn-browse-screenshot-dir" class="win95-btn btn-sm" title="Browse destination folder for Auto Save Image">
+                  Browse...
+                </button>
+                <button type="button" id="modal-btn-default-screenshot-dir" class="win95-btn btn-sm" title="Reset to default {setting.json folder}\\image">
+                  Default
+                </button>
+                <button type="button" id="modal-btn-open-screenshot-dir" class="win95-btn btn-sm" title="Open screenshot folder in Explorer">
+                  Open Folder
+                </button>
+              </div>
+              <div id="setting-screenshot-default-hint" class="modal-desc-note text-mono text-muted path-scroll-box">
+                Default: {setting.json folder}\image\{project}\{bat}.png (overwrites existing)
+              </div>
+              <div id="modal-setting-file-desc" class="modal-desc-note text-mono text-muted path-scroll-box">
+                Config: setting.json
+              </div>
+              <div id="setting-unsaved-note" class="autoconfig-summary" style="display: none; color: #995500; margin-top: 6px;"></div>
+            </fieldset>
+          </div>
 
           <div class="modal-bottom-bar">
             <button id="modal-btn-reset-settings" class="win95-btn">
@@ -616,9 +662,10 @@
                 <tr>
                   <th style="width: 30px; text-align: center;">#</th>
                   <th>Batch File</th>
-                  <th style="width: 82px; text-align: center;">Status</th>
-                  <th style="width: 72px; text-align: center;">Exit</th>
-                  <th style="width: 78px; text-align: right;">Time</th>
+                  <th style="width: 78px; text-align: center;">Status</th>
+                  <th style="width: 58px; text-align: center;">Exit</th>
+                  <th style="width: 74px; text-align: right;">Time</th>
+                  <th style="width: 74px; text-align: center;">Image</th>
                 </tr>
               </thead>
               <tbody id="tbody-group-run-results"></tbody>
@@ -631,6 +678,9 @@
           </fieldset>
 
           <div class="modal-bottom-bar">
+            <button id="modal-btn-open-group-image" class="win95-btn" title="Open saved PNG screenshot for selected step" disabled>
+              Open Image
+            </button>
             <div class="flex-spacer"></div>
             <button id="modal-btn-close-group-run" class="win95-btn btn-bold">
               Close
@@ -640,8 +690,94 @@
       </div>
     </div>
 
-    <!-- WIN95 CONTEXT MENU FOR BAT LIST -->
+    <!-- MODAL 7: ADD BATCH GROUP -->
+    <div id="modal-add-group" class="win95-modal-backdrop" style="display: none;">
+      <div class="window win95-modal-window modal-medium" style="width: 480px;">
+        <div class="title-bar">
+          <div class="title-bar-text">Add Batch Files to Group</div>
+          <div class="title-bar-controls">
+            <button aria-label="Close" id="btn-close-modal-add-group"></button>
+          </div>
+        </div>
+        <div class="window-body modal-content-box">
+          <fieldset class="win95-box">
+            <legend><b id="add-group-files-summary">Selected BAT Files (0)</b></legend>
+            <div id="add-group-files-list" class="add-group-files-box text-mono"></div>
+          </fieldset>
+
+          <fieldset class="win95-box">
+            <legend><b>Target Batch Group</b></legend>
+            <div class="add-group-mode-row">
+              <label class="add-group-radio-label" for="add-group-mode-new">
+                <input id="add-group-mode-new" type="radio" name="add-group-mode" value="new" checked />
+                <span>Create new group</span>
+              </label>
+              <input
+                id="add-group-new-name"
+                type="text"
+                class="bar-input"
+                placeholder="Enter group name (e.g. Daily Master)..."
+              />
+            </div>
+
+            <div class="add-group-mode-row" style="margin-top: 8px;">
+              <label class="add-group-radio-label" for="add-group-mode-existing">
+                <input id="add-group-mode-existing" type="radio" name="add-group-mode" value="existing" />
+                <span>Add to existing group</span>
+              </label>
+              <select id="add-group-existing-select" class="bar-input">
+                <option value="">-- No existing groups --</option>
+              </select>
+            </div>
+          </fieldset>
+
+          <div id="add-group-error" class="add-group-error-box" style="display: none;"></div>
+
+          <div class="modal-bottom-bar">
+            <div class="flex-spacer"></div>
+            <button id="modal-btn-save-add-group" class="win95-btn btn-bold" style="margin-right: 6px;">
+              Save
+            </button>
+            <button id="modal-btn-cancel-add-group" class="win95-btn">
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL 8: CONFIRM CLEAR ALL LOG -->
+    <div id="modal-confirm-clear-log" class="win95-modal-backdrop" style="display: none;">
+      <div class="window win95-modal-window modal-small" style="width: 460px;">
+        <div class="title-bar">
+          <div class="title-bar-text">Confirm Clear All Log</div>
+          <div class="title-bar-controls">
+            <button aria-label="Close" id="btn-close-modal-clear-log"></button>
+          </div>
+        </div>
+        <div class="window-body modal-content-box">
+          <div class="modal-flex-content" style="align-items: flex-start;">
+            <div class="modal-big-icon">[!]</div>
+            <div id="clear-log-confirm-msg" class="modal-msg-text">
+              Clear all displayed console logs and truncate target .log files for this project?
+            </div>
+          </div>
+          <div class="modal-bottom-bar">
+            <div class="flex-spacer"></div>
+            <button id="modal-btn-confirm-clear-log" class="win95-btn btn-bold" style="margin-right: 6px;">
+              Yes, Clear All Log
+            </button>
+            <button id="modal-btn-cancel-clear-log" class="win95-btn">
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- WIN95 CONTEXT MENUS FOR BAT LIST & SAVED GROUPS -->
     <div id="bat-context-menu" class="win95-context-menu" style="display: none;"></div>
+    <div id="group-context-menu" class="win95-context-menu" style="display: none;"></div>
 
     <!-- MODAL 3: RETRO WIN95 ALERT -->
     <div id="alert-modal" class="win95-modal-backdrop" style="display: none;">
