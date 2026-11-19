@@ -761,7 +761,9 @@ input[type="submit"]:disabled {
         display: flex;
         align-items: center;
         gap: 4px;
-        padding: 0 8px !important;
+        min-width: 0;
+        overflow: hidden;
+        padding: 0 7px !important;
         transition: background-color 0.1s;
       }
 
@@ -776,33 +778,55 @@ input[type="submit"]:disabled {
 
       .footer-label {
         font-size: 10.5px;
+        flex-shrink: 0;
       }
 
       .footer-val {
         font-size: 10.5px;
       }
 
-      .footer-arrow {
-        font-size: 9px;
-        color: #555555;
-        margin-left: 2px;
+      .footer-clickable .footer-val {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .footer-gear {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 12px;
+        height: 12px;
+        color: #444444;
+        margin-left: auto;
+        flex-shrink: 0;
+      }
+
+      .footer-clickable:hover .footer-gear {
+        color: #000080;
       }
 
       #footer-ant-btn {
-        flex: 0 0 200px;
+        flex: 0 0 155px;
       }
 
       #footer-java-btn {
+        flex: 0 0 165px;
+      }
+
+      #footer-db-btn {
         flex: 0 0 215px;
       }
 
       #footer-config-btn {
-        flex: 0 0 155px;
+        flex: 0 0 148px;
       }
 
       .footer-settings {
         flex: 1;
-        min-width: 0;
+        min-width: 80px;
         display: flex;
         align-items: center;
         gap: 4px;
@@ -810,10 +834,13 @@ input[type="submit"]:disabled {
       }
 
       .footer-pill {
-        width: 100px;
-        flex: none;
+        width: auto;
+        min-width: 100px;
+        flex: 0 0 auto;
+        padding: 0 8px !important;
         text-align: center;
         font-weight: bold;
+        white-space: nowrap;
       }
 
       /* ==========================================================================
@@ -1227,38 +1254,33 @@ input[type="submit"]:disabled {
         box-sizing: border-box;
       }
 
-      .cmd-picker-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-        padding: 5px 10px;
-        background-color: #1f1f1f;
-        border-bottom: 1px solid #3a3a3a;
-        cursor: move;
-        flex-shrink: 0;
-      }
-
-      .cmd-picker-header-title {
-        font-family: "Consolas", "Courier New", monospace !important;
-        font-size: 12px;
-        font-weight: bold;
-        color: #f0f0f0;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
       .cmd-picker-dim-badge {
         font-family: "Consolas", "Courier New", monospace !important;
-        font-size: 12px;
+        font-size: 11px;
         font-weight: bold;
         padding: 2px 8px;
         background-color: #000080;
         color: #ffffff;
-        border: 1px solid #ffffff;
+        border: 1px solid #808080;
         white-space: nowrap;
         flex-shrink: 0;
+      }
+
+      .db-pwd-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .db-test-result-box {
+        margin-top: 8px;
+        padding: 6px 8px;
+        background-color: #ffffff;
+        border: 1px solid #808080;
+        box-shadow: inset 1px 1px #0a0a0a, inset -1px -1px #ffffff;
+        font-size: 11px;
+        line-height: 1.45;
+        word-break: break-word;
       }
 
       .cmd-picker-terminal {

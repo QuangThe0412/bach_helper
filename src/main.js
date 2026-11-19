@@ -29,6 +29,7 @@ let userSetting = {
 
 let batSplitLeftPct = 40;
 let batViewerDarkTheme = false;
+let dbPasswordVisible = false;
 let groupRunSteps = [];
 let groupRunSelectedIdx = 0;
 let activeGroupRunLocked = false;
@@ -54,7 +55,7 @@ function isModalVisible(modalId) {
 }
 
 function closeAllRegularModals() {
-  const modalIds = ['modal-ant', 'modal-java', 'modal-settings', 'modal-auto-config'];
+  const modalIds = ['modal-ant', 'modal-java', 'modal-db', 'modal-settings', 'modal-auto-config'];
   modalIds.forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.style.display = 'none';
@@ -82,8 +83,10 @@ function createTabState(projectPath = '') {
     defaultTarget: '',
     selectedTarget: '',
     propertiesFile: null,
+    dbInfo: null,
     buildStatus: 'READY',
     buildStatusClass: 'badge-gray',
+    footerStatusText: 'Ready',
     isBuilding: false,
     isGroupRunning: false,
     cmdPanelOpen: false,
@@ -111,6 +114,7 @@ function resetTabProjectState(tab) {
   tab.defaultTarget = '';
   tab.selectedTarget = '';
   tab.propertiesFile = null;
+  tab.dbInfo = null;
   tab.batFolder = '';
   tab.batFiles = [];
   tab.selectedBatPath = '';
@@ -232,6 +236,55 @@ function addNewProjectTab(projectPath = '') {
   return newTab;
 }
 
+function formatCurrentTimeHHMMSS() {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const ss = String(now.getSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
+
+function setTabFooterStatus(tab, text) {
+  if (!tab) return;
+  tab.footerStatusText = text || 'Ready';
+  if (tab.id === activeTabId) {
+    const footerStatus = document.getElementById('footer-status-text');
+    if (footerStatus) {
+      footerStatus.textContent = tab.footerStatusText;
+      footerStatus.title = tab.footerStatusText;
+    }
+  }
+}
+
+function updateFooterDbUI(tab = getActiveTab()) {
+  const dbValEl = document.getElementById('footer-db-val');
+  const dbBtnEl = document.getElementById('footer-db-btn');
+  if (!dbValEl) return;
+
+  const info = tab && tab.dbInfo ? tab.dbInfo : null;
+  if (!info || !info.found) {
+    dbValEl.textContent = 'N/A';
+    dbValEl.style.color = '#666666';
+    if (dbBtnEl) {
+      dbBtnEl.title = 'Click to inspect & test Database configuration from selected target .properties';
+    }
+    return;
+  }
+
+  dbValEl.textContent = info.summary_label || 'Configured';
+  dbValEl.style.color = info.warning_message ? '#995500' : '#000000';
+  if (dbBtnEl) {
+    const lines = [
+      `DB Type: ${info.db_type || 'Unknown'}`,
+      `Server: ${info.effective_server || info.host || 'N/A'}`,
+      `Database: ${info.database || 'N/A'}`,
+      `User: ${info.user || 'N/A'}`,
+      `Config: ${info.properties_file || 'N/A'}`,
+    ];
+    dbBtnEl.title = lines.join('\n');
+  }
+}
+
 // Sync all main workspace controls to the currently active tab
 function syncUIToActiveTab() {
   const tab = getActiveTab();
@@ -336,6 +389,13 @@ function syncUIToActiveTab() {
     inputBatFilter.value = tab.batFilter || '';
   }
 
+  const footerStatus = document.getElementById('footer-status-text');
+  if (footerStatus) {
+    footerStatus.textContent = tab.footerStatusText || 'Ready';
+    footerStatus.title = tab.footerStatusText || 'Ready';
+  }
+
+  updateFooterDbUI(tab);
   updateLogButtonsUI(tab);
   applyBatSplitWidth(batSplitLeftPct);
   applyBatThemeUI();
@@ -554,10 +614,7 @@ async function scanProjectForTab(tab, path) {
     syncUIToActiveTab();
   }
 
-  const footerStatus = document.getElementById('footer-status-text');
-  if (tab.id === activeTabId && footerStatus) {
-    footerStatus.textContent = 'Scanning...';
-  }
+  setTabFooterStatus(tab, 'Scanning...');
 
   try {
     const res = await invoke('scan_project_dir', { path: cleanPath });
@@ -565,10 +622,10 @@ async function scanProjectForTab(tab, path) {
 
     if (!res.is_valid_directory) {
       resetTabProjectState(tab);
+      setTabFooterStatus(tab, 'Error');
       if (tab.id === activeTabId) {
         syncUIToActiveTab();
         showAlert('Invalid Directory', res.error_message || 'Directory is not valid.', '[X]');
-        if (footerStatus) footerStatus.textContent = 'Error';
       }
       return;
     }
@@ -582,11 +639,9 @@ async function scanProjectForTab(tab, path) {
     if (!res.build_xml_found || res.ant_targets.length === 0) {
       resetTabProjectState(tab);
       tab.buildDir = res.build_folder_found && res.build_folder_path ? res.build_folder_path : cleanPath;
+      setTabFooterStatus(tab, !res.build_xml_found ? 'No build.xml' : 'No targets');
       if (tab.id === activeTabId) {
         syncUIToActiveTab();
-        if (footerStatus) {
-          footerStatus.textContent = !res.build_xml_found ? 'No build.xml' : 'No targets';
-        }
       }
       return;
     }
@@ -605,15 +660,17 @@ async function scanProjectForTab(tab, path) {
     await inspectTargetBatFilesForTab(tab, cleanPath, tab.selectedTarget, reqSeq);
     if (tab.requestSeq !== reqSeq) return;
 
+    setTabFooterStatus(tab, 'Ready');
     if (tab.id === activeTabId) {
       syncUIToActiveTab();
-      if (footerStatus) footerStatus.textContent = 'Ready';
     }
   } catch (err) {
     console.error('Scan project failed:', err);
-    if (tab.requestSeq === reqSeq && tab.id === activeTabId) {
-      showAlert('Error', `Failed to scan project: ${err}`, '[X]');
-      if (footerStatus) footerStatus.textContent = 'Error';
+    if (tab.requestSeq === reqSeq) {
+      setTabFooterStatus(tab, 'Error');
+      if (tab.id === activeTabId) {
+        showAlert('Error', `Failed to scan project: ${err}`, '[X]');
+      }
     }
   }
 }
@@ -656,6 +713,39 @@ function pruneTabBatSelections(tab) {
   }
 }
 
+async function refreshDatabaseInfoForTab(tab, expectedSeq = null) {
+  if (!tab || !tab.projectPath || !tab.selectedTarget) {
+    if (tab) {
+      tab.dbInfo = null;
+      if (tab.id === activeTabId) updateFooterDbUI(tab);
+    }
+    return null;
+  }
+
+  const projectPath = tab.projectPath;
+  const target = tab.selectedTarget;
+  const reqSeq = expectedSeq !== null ? expectedSeq : tab.requestSeq || 0;
+
+  try {
+    const dbInfo = await invoke('inspect_database_config', { projectPath, target });
+    if (
+      (tab.requestSeq || 0) !== reqSeq ||
+      (tab.projectPath || '').trim().toLowerCase() !== projectPath.trim().toLowerCase() ||
+      tab.selectedTarget !== target
+    ) {
+      return null;
+    }
+    tab.dbInfo = dbInfo;
+    if (tab.id === activeTabId) {
+      updateFooterDbUI(tab);
+    }
+    return dbInfo;
+  } catch (err) {
+    console.error('Inspect database config failed:', err);
+    return null;
+  }
+}
+
 async function inspectTargetBatFilesForTab(tab, projectPath, target, expectedSeq = null) {
   if (!tab || !projectPath || !target) return;
 
@@ -665,7 +755,10 @@ async function inspectTargetBatFilesForTab(tab, projectPath, target, expectedSeq
   }
 
   try {
-    const inspection = await invoke('inspect_build_target', { projectPath, target });
+    const [inspection, dbInfo] = await Promise.all([
+      invoke('inspect_build_target', { projectPath, target }),
+      invoke('inspect_database_config', { projectPath, target }).catch(() => null),
+    ]);
     if (
       tab.requestSeq !== reqSeq ||
       (tab.projectPath || '').trim().toLowerCase() !== projectPath.trim().toLowerCase() ||
@@ -675,6 +768,7 @@ async function inspectTargetBatFilesForTab(tab, projectPath, target, expectedSeq
     }
 
     tab.propertiesFile = inspection.properties_file || null;
+    tab.dbInfo = dbInfo;
     tab.batFolder = inspection.bat_folder || '';
     tab.batchLogName = inspection.batch_log_name || null;
     tab.appLogName = inspection.app_log_name || null;
@@ -711,6 +805,7 @@ async function inspectTargetBatFilesForTab(tab, projectPath, target, expectedSeq
       if (btnShowConfig) {
         btnShowConfig.disabled = !(tab.projectPath && tab.selectedTarget);
       }
+      updateFooterDbUI(tab);
       updateLogButtonsUI(tab);
       applyBatFilterAndRender(tab);
       renderBatPreview(tab);
@@ -1619,11 +1714,10 @@ async function executeBuildForActiveTab() {
   tab.buildStatusClass = 'badge-yellow';
   tab.consoleLogs = '';
 
+  tab.footerStatusText = 'Building...';
+
   renderTabsBar();
   syncUIToActiveTab();
-
-  const footerStatus = document.getElementById('footer-status-text');
-  footerStatus.textContent = 'Building...';
 
   const buildProjectPath = tab.projectPath;
   const buildTarget = target;
@@ -1661,24 +1755,27 @@ async function executeBuildForActiveTab() {
           await loadBatFileContentForTab(tab, matched);
         }
       }
+
+      await refreshDatabaseInfoForTab(tab, buildSeq);
     }
 
     if (res.success) {
+      const doneAt = formatCurrentTimeHHMMSS();
       tab.buildStatus = '\u2714 BUILD SUCCESSFUL';
       tab.buildStatusClass = 'badge-green';
-      if (tab.id === activeTabId) footerStatus.textContent = 'Build Successful';
+      setTabFooterStatus(tab, `Build Successful (${doneAt})`);
     } else {
       tab.buildStatus = '\u2716 BUILD FAILED';
       tab.buildStatusClass = 'badge-red';
-      if (tab.id === activeTabId) footerStatus.textContent = 'Build Failed';
+      setTabFooterStatus(tab, 'Build Failed');
     }
   } catch (err) {
     console.error('Build execution failed:', err);
     tab.buildStatus = '\u2716 BUILD ERROR';
     tab.buildStatusClass = 'badge-red';
+    setTabFooterStatus(tab, 'Error');
     appendBuildLogForTab(tab.id, `[ERROR] ${err}`);
     if (tab.id === activeTabId) {
-      footerStatus.textContent = 'Error';
       showAlert('Build Error', `Failed to execute build: ${err}`, '[X]');
     }
   } finally {
@@ -2108,16 +2205,18 @@ async function refreshAutoConfigChecks() {
 
     if (summaryEl) {
       if (!hasTarget) {
+        summaryEl.style.display = 'block';
         summaryEl.textContent =
           'Select a project directory and target package first before applying Auto Config.';
       } else if (antOk && javaOk && winOk) {
-        summaryEl.textContent =
-          `All 3 checks passed. [Apply Auto Config] will configure build.xml & .properties using Java Home "${effectiveJavaHome}" and encoding-safe short paths.`;
+        summaryEl.style.display = 'none';
+        summaryEl.textContent = '';
       } else {
         const missing = [];
         if (!antOk) missing.push('Apache Ant');
         if (!javaOk) missing.push('Java (JDK)');
         if (!winOk) missing.push('Window Size');
+        summaryEl.style.display = 'block';
         summaryEl.textContent =
           `Warning: [${missing.join(', ')}] not ready. Use Config / Setting above to resolve, or apply path updates now.`;
       }
@@ -2125,6 +2224,7 @@ async function refreshAutoConfigChecks() {
   } catch (err) {
     console.error('Auto config pre-check failed:', err);
     if (summaryEl) {
+      summaryEl.style.display = 'block';
       summaryEl.textContent = `Check failed: ${err}`;
     }
   }
@@ -2423,6 +2523,200 @@ function setupUIEvents() {
     openSingleModal('modal-java');
   });
 
+  // Database Modal Helpers & Events
+  const updateDbPasswordDisplay = (pwd) => {
+    const pwdEl = document.getElementById('modal-db-password');
+    const toggleBtn = document.getElementById('modal-btn-toggle-db-pwd');
+    if (!pwdEl) return;
+    if (!pwd) {
+      pwdEl.textContent = '-';
+      if (toggleBtn) toggleBtn.style.display = 'none';
+      return;
+    }
+    if (toggleBtn) {
+      toggleBtn.style.display = 'inline-block';
+      toggleBtn.textContent = dbPasswordVisible ? 'Hide' : 'Show';
+    }
+    pwdEl.textContent = dbPasswordVisible ? pwd : '*'.repeat(Math.min(Math.max(pwd.length, 6), 14));
+  };
+
+  const renderDatabaseModal = (info, tab) => {
+    const statusEl = document.getElementById('modal-db-status');
+    const driverEl = document.getElementById('modal-db-driver');
+    const serverEl = document.getElementById('modal-db-server');
+    const portEl = document.getElementById('modal-db-port');
+    const nameEl = document.getElementById('modal-db-name');
+    const userEl = document.getElementById('modal-db-user');
+    const poolEl = document.getElementById('modal-db-pool');
+    const urlEl = document.getElementById('modal-db-url');
+    const propEl = document.getElementById('modal-db-prop-file');
+    const warnEl = document.getElementById('modal-db-warning');
+    const testBtn = document.getElementById('modal-btn-test-db');
+    const openPropBtn = document.getElementById('modal-btn-open-db-prop');
+
+    const hasConfig = !!(info && info.found);
+    if (statusEl) {
+      if (!tab || !tab.projectPath || !tab.selectedTarget) {
+        statusEl.innerHTML = '<span class="badge badge-gray">NO PROJECT SELECTED</span>';
+      } else if (hasConfig) {
+        statusEl.innerHTML = `<span class="badge badge-green">CONFIGURED (${escapeHtml(info.db_type || 'DB')})</span>`;
+      } else {
+        statusEl.innerHTML = '<span class="badge badge-yellow">NOT FOUND IN PROPERTIES</span>';
+      }
+    }
+
+    if (driverEl) {
+      driverEl.textContent = info && info.driver
+        ? `${info.db_type || 'DB'} | ${info.driver}`
+        : (info && info.db_type) || '-';
+    }
+    if (serverEl) {
+      serverEl.textContent = (info && (info.effective_server || info.host)) || '-';
+    }
+    if (portEl) {
+      portEl.textContent = (info && info.port_or_instance) || '-';
+    }
+    if (nameEl) {
+      nameEl.textContent = (info && info.database) || '-';
+    }
+    if (userEl) {
+      userEl.textContent = (info && info.user) || '-';
+    }
+    updateDbPasswordDisplay(info ? info.password : null);
+
+    if (poolEl) {
+      const initP = info && info.init_pool ? info.init_pool : '-';
+      const maxP = info && info.max_pool ? info.max_pool : '-';
+      poolEl.textContent = info && (info.init_pool || info.max_pool)
+        ? `init: ${initP} / max: ${maxP}`
+        : '-';
+    }
+    if (urlEl) {
+      urlEl.textContent = (info && info.jdbc_url) || '-';
+      urlEl.title = urlEl.textContent;
+    }
+    if (propEl) {
+      propEl.textContent = (info && info.properties_file) || '-';
+      propEl.title = propEl.textContent;
+    }
+
+    if (warnEl) {
+      if (info && info.warning_message) {
+        warnEl.style.display = 'block';
+        warnEl.textContent = info.warning_message;
+      } else {
+        warnEl.style.display = 'none';
+        warnEl.textContent = '';
+      }
+    }
+
+    if (testBtn) {
+      testBtn.disabled = !(tab && tab.projectPath && tab.selectedTarget && hasConfig);
+    }
+    if (openPropBtn) {
+      openPropBtn.disabled = !(info && info.properties_file);
+    }
+  };
+
+  const refreshAndRenderDbModal = async (clearResult = true) => {
+    const tab = getActiveTab();
+    dbPasswordVisible = false;
+    const resultEl = document.getElementById('modal-db-test-result');
+    if (clearResult && resultEl) {
+      resultEl.style.display = 'none';
+      resultEl.innerHTML = '';
+    }
+
+    renderDatabaseModal(tab ? tab.dbInfo : null, tab);
+    if (tab && tab.projectPath && tab.selectedTarget) {
+      const freshInfo = await refreshDatabaseInfoForTab(tab);
+      if (freshInfo) {
+        renderDatabaseModal(freshInfo, tab);
+      }
+    }
+  };
+
+  const closeDbModal = () => {
+    document.getElementById('modal-db').style.display = 'none';
+  };
+
+  document.getElementById('footer-db-btn').addEventListener('click', async () => {
+    openSingleModal('modal-db');
+    await refreshAndRenderDbModal(true);
+  });
+
+  document.getElementById('btn-close-modal-db').addEventListener('click', closeDbModal);
+  document.getElementById('modal-btn-close-db').addEventListener('click', closeDbModal);
+
+  document.getElementById('modal-btn-refresh-db').addEventListener('click', async () => {
+    await refreshAndRenderDbModal(false);
+  });
+
+  document.getElementById('modal-btn-toggle-db-pwd').addEventListener('click', () => {
+    dbPasswordVisible = !dbPasswordVisible;
+    const tab = getActiveTab();
+    updateDbPasswordDisplay(tab && tab.dbInfo ? tab.dbInfo.password : null);
+  });
+
+  document.getElementById('modal-btn-open-db-prop').addEventListener('click', async () => {
+    const tab = getActiveTab();
+    const propPath = tab && tab.dbInfo && tab.dbInfo.properties_file;
+    if (!propPath) return;
+    try {
+      await invoke('open_file_default', { path: propPath });
+    } catch (err) {
+      showAlert('Open Config Error', `Failed to open properties file: ${escapeHtml(err)}`, '[X]');
+    }
+  });
+
+  document.getElementById('modal-btn-test-db').addEventListener('click', async (e) => {
+    const tab = getActiveTab();
+    if (!tab || !tab.projectPath || !tab.selectedTarget) return;
+
+    const btn = e.currentTarget;
+    const resultEl = document.getElementById('modal-db-test-result');
+    try {
+      btn.disabled = true;
+      btn.textContent = 'Testing...';
+      if (resultEl) {
+        resultEl.style.display = 'block';
+        resultEl.innerHTML = '<span class="badge badge-yellow">TESTING...</span> Connecting to database...';
+      }
+
+      const freshInfo = await refreshDatabaseInfoForTab(tab);
+      if (freshInfo) {
+        renderDatabaseModal(freshInfo, tab);
+      }
+
+      const res = await invoke('test_database_connection', {
+        projectPath: tab.projectPath,
+        target: tab.selectedTarget,
+      });
+
+      if (resultEl) {
+        const badge = res.success
+          ? '<span class="badge badge-green">CONNECTED</span>'
+          : '<span class="badge badge-red">FAILED</span>';
+        const verLine = res.server_version
+          ? `<br><b>Version:</b> ${escapeHtml(res.server_version)}`
+          : '';
+        resultEl.style.display = 'block';
+        resultEl.innerHTML =
+          `${badge} <b>${escapeHtml(res.db_type)}</b> | ${escapeHtml(res.target_server || '-')} | DB: <b>${escapeHtml(res.database || '-')}</b> (${res.duration_ms} ms)` +
+          verLine +
+          `<br>${escapeHtml(res.message || '')}`;
+      }
+    } catch (err) {
+      if (resultEl) {
+        resultEl.style.display = 'block';
+        resultEl.innerHTML = `<span class="badge badge-red">ERROR</span> ${escapeHtml(String(err))}`;
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Test Connection';
+    }
+  });
+
   document.getElementById('footer-config-btn').addEventListener('click', () => {
     populateSettingsModal();
     openSingleModal('modal-settings');
@@ -2645,6 +2939,13 @@ function setupUIEvents() {
       return;
     }
 
+    if (isModalVisible('modal-db')) {
+      closeDbModal();
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
     if (isModalVisible('modal-ant')) {
       closeAntModal();
       e.preventDefault();
@@ -2849,10 +3150,6 @@ async function initCmdSizePickerMode() {
   document.body.className = 'cmd-picker-body';
   document.body.innerHTML = `
     <div class="cmd-picker-shell">
-      <div class="cmd-picker-header" title="Drag here or resize window borders to calibrate CMD size">
-        <span class="cmd-picker-header-title">C:\\Windows\\System32\\cmd.exe - Batch Run Size Preview</span>
-        <span class="cmd-picker-dim-badge" data-role="dim-badge">-- x -- px</span>
-      </div>
       <div class="cmd-picker-terminal" title="Drag background to move window; drag window edges/corners to resize">
 <span class="cmd-picker-prompt">PS C:\\...\\target\\batch\\batfiles&gt;</span> .\\SampleBatchJob.bat
 Microsoft Windows [Version 10.0]
@@ -2868,6 +3165,7 @@ Batch Helper - Simulated Command Prompt Window Size Preview
       <div class="cmd-picker-footer">
         <span class="cmd-picker-footer-info" data-role="dim-info">Resize window edges/corners, then click DONE.</span>
         <div class="cmd-picker-footer-actions">
+          <span class="cmd-picker-dim-badge" data-role="dim-badge">-- x -- px</span>
           <button type="button" class="win95-btn" data-role="btn-cancel">Cancel</button>
           <button type="button" class="win95-btn cmd-picker-done-btn" data-role="btn-done">DONE</button>
         </div>
@@ -2879,7 +3177,6 @@ Batch Helper - Simulated Command Prompt Window Size Preview
   const dimInfo = document.body.querySelector('[data-role="dim-info"]');
   const btnCancel = document.body.querySelector('[data-role="btn-cancel"]');
   const btnDone = document.body.querySelector('[data-role="btn-done"]');
-  const headerEl = document.body.querySelector('.cmd-picker-header');
   const terminalEl = document.body.querySelector('.cmd-picker-terminal');
 
   const updateReadout = (dims) => {
@@ -2887,7 +3184,7 @@ Batch Helper - Simulated Command Prompt Window Size Preview
     const text = `${dims.width} x ${dims.height} px`;
     if (dimBadge) dimBadge.textContent = text;
     if (dimInfo) {
-      dimInfo.textContent = `Drag edges/corners to resize. Current outer size: ${text}`;
+      dimInfo.textContent = `Drag edges/corners to resize. Current window size: ${text}`;
     }
   };
 
@@ -2913,7 +3210,6 @@ Batch Helper - Simulated Command Prompt Window Size Preview
     if (e.target && e.target.closest('button')) return;
     invoke('start_drag_cmd_size_picker').catch(() => {});
   };
-  if (headerEl) headerEl.addEventListener('mousedown', handleDragMouseDown);
   if (terminalEl) terminalEl.addEventListener('mousedown', handleDragMouseDown);
 
   const confirmAndClose = async () => {

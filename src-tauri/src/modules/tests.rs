@@ -183,6 +183,7 @@ mod tests {
         assert!(script.contains("& '.\\demo.bat'"));
         assert!(script.contains("function global:prompt"));
         assert!(script.contains("MoveWindow"));
+        assert!(script.contains("PrimaryScreen.WorkingArea"));
         assert!(script.contains("Clipboard"));
         assert!(script.contains("1120"));
         assert!(script.contains("720"));
@@ -585,5 +586,110 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_inspect_database_config_sqlserver_variants() {
+        use crate::modules::db_manager::*;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!("bh_db_inspect_{}", unique));
+
+        // Variant A: instance embedded in pom.db.host.value (10.51.162.54\\YSZY_UT)
+        let proj_a = base.join("proj_a");
+        std::fs::create_dir_all(proj_a.join("build").join("filters")).unwrap();
+        std::fs::create_dir_all(proj_a.join("batch").join("properties")).unwrap();
+        std::fs::write(
+            proj_a.join("build").join("build.xml"),
+            "<project name=\"a\" default=\"development-package\"><target name=\"development-package\"></target></project>",
+        )
+        .unwrap();
+        std::fs::write(
+            proj_a.join("build").join("filters").join("development.properties"),
+            "pom.db.host.value=10.51.162.54\\\\YSZY_UT\npom.db.database.value=UT_013\npom.db.user.value=UT_013\npom.db.pswd.value=SECRET1\npom.db.init.value=1\npom.db.max.value=10\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj_a.join("batch").join("properties").join("database.properties.filter"),
+            "database_name,rbsite_ora\ndriver,com.microsoft.sqlserver.jdbc.SQLServerDriver\nurl,jdbc:sqlserver://@pom.db.host.value@;integratedSecurity=false;databaseName=@pom.db.database.value@\nuser,@pom.db.user.value@\npswd,@pom.db.pswd.value@\ninitarray,@pom.db.init.value@\nmaxarray,@pom.db.max.value@\n",
+        )
+        .unwrap();
+
+        let info_a = inspect_database_config(&proj_a.to_string_lossy(), "development-package");
+        assert!(info_a.found);
+        assert_eq!(info_a.db_type, "SQL Server");
+        assert_eq!(info_a.effective_server.as_deref(), Some("10.51.162.54\\YSZY_UT"));
+        assert_eq!(info_a.database.as_deref(), Some("UT_013"));
+        assert_eq!(info_a.user.as_deref(), Some("UT_013"));
+        assert_eq!(info_a.password.as_deref(), Some("SECRET1"));
+        assert_eq!(info_a.init_pool.as_deref(), Some("1"));
+        assert_eq!(info_a.max_pool.as_deref(), Some("10"));
+        assert!(info_a.warning_message.is_none());
+
+        // Variant B: separate host + port/serviceName & unresolved token warning
+        let proj_b = base.join("proj_b");
+        std::fs::create_dir_all(proj_b.join("build").join("filters")).unwrap();
+        std::fs::create_dir_all(proj_b.join("batch").join("properties")).unwrap();
+        std::fs::write(
+            proj_b.join("build").join("build.xml"),
+            "<project name=\"b\" default=\"development-package\"><target name=\"development-package\"></target></project>",
+        )
+        .unwrap();
+        std::fs::write(
+            proj_b.join("build").join("filters").join("development.properties"),
+            "pom.db.host.value=172.16.0.233\npom.db.port.value=MDINF01\npom.db.serviceName.value=MDAUTO_QT\npom.db.user.value=USR1\npom.db.pswd.value=PWD1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj_b.join("batch").join("properties").join("database.properties.filter"),
+            "driver,com.microsoft.sqlserver.jdbc.SQLServerDriver\nurl,jdbc:sqlserver://@pom.db.host.value@\\@pom.db.port.value@;databaseName=@pom.db.name.value@\n",
+        )
+        .unwrap();
+
+        let info_b = inspect_database_config(&proj_b.to_string_lossy(), "development-package");
+        assert!(info_b.found);
+        assert_eq!(info_b.effective_server.as_deref(), Some("172.16.0.233\\MDINF01"));
+        assert_eq!(info_b.database.as_deref(), Some("MDAUTO_QT"));
+        assert!(info_b.warning_message.is_some());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_database_connection_invalid_port_fast_fail() {
+        use crate::modules::db_manager::*;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!("bh_db_fail_{}", unique));
+        std::fs::create_dir_all(root.join("build").join("filters")).unwrap();
+        std::fs::create_dir_all(root.join("batch").join("properties")).unwrap();
+        std::fs::write(
+            root.join("build").join("build.xml"),
+            "<project name=\"t\" default=\"development-package\"><target name=\"development-package\"></target></project>",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("build").join("filters").join("development.properties"),
+            "pom.db.host.value=127.0.0.1\npom.db.port.value=1\npom.db.serviceName.value=ORCL\npom.db.user.value=scott\npom.db.pswd.value=tiger\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("batch").join("properties").join("database.properties.filter"),
+            "driver,oracle.jdbc.driver.OracleDriver\nurl,jdbc:oracle:thin:@@pom.db.host.value@:@pom.db.port.value@:@pom.db.serviceName.value@\n",
+        )
+        .unwrap();
+
+        let res = test_database_connection(&root.to_string_lossy(), "development-package");
+        assert!(!res.success);
+        assert_eq!(res.db_type, "Oracle");
+        assert!(!res.message.trim().is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

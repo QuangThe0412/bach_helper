@@ -2102,10 +2102,9 @@ try {{
         $buf.Height = [Math]::Max($buf.Height, 3000)
         $Host.UI.RawUI.BufferSize = $buf
 
-        $rect = New-Object Win32Cap+RECT
-        [Win32Cap]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
-        $x = [Math]::Max(20, $rect.Left)
-        $y = [Math]::Max(20, $rect.Top)
+        $workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        $x = $workArea.Left + [Math]::Max(0, [int](($workArea.Width - {width}) / 2))
+        $y = $workArea.Top + [Math]::Max(0, [int](($workArea.Height - {height}) / 2))
         [Win32Cap]::MoveWindow($hwnd, $x, $y, {width}, {height}, $true) | Out-Null
         Start-Sleep -Milliseconds 100
 

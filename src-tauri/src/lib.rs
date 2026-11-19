@@ -5,6 +5,7 @@ use modules::app_config::{self, UserSetting};
 use modules::builder::{
     self, AutoConfigResult, BatFileInfo, BatGroupStepResult, BuildResult, PostBuildInspection,
 };
+use modules::db_manager::{self, DatabaseConfigInfo, DatabaseTestResult};
 use modules::encoding;
 use modules::environment::{self, CommandExecutionResult, SystemEnvironmentInfo};
 use modules::jdk_manager::{self, JavaTestResult, JdkScanResult};
@@ -15,11 +16,49 @@ use std::path::Path;
 use tauri::{AppHandle, Emitter, Manager};
 
 const CMD_SIZE_PICKER_LABEL: &str = "cmd-size-picker";
+const CMD_SIZE_PICKER_ALPHA: u8 = 195;
 
 #[derive(Debug, Clone, Serialize)]
 struct CmdSizePayload {
     width: u32,
     height: u32,
+}
+
+fn apply_window_opacity(win: &tauri::WebviewWindow, alpha: u8) {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn GetWindowLongW(hwnd: isize, nIndex: i32) -> i32;
+            fn SetWindowLongW(hwnd: isize, nIndex: i32, dwNewLong: i32) -> i32;
+            fn SetLayeredWindowAttributes(
+                hwnd: isize,
+                crKey: u32,
+                bAlpha: u8,
+                dwFlags: u32,
+            ) -> i32;
+        }
+
+        const GWL_EXSTYLE: i32 = -20;
+        const WS_EX_LAYERED: i32 = 0x0008_0000;
+        const LWA_ALPHA: u32 = 0x0000_0002;
+
+        if let Ok(hwnd) = win.hwnd() {
+            let hwnd_val = hwnd.0 as isize;
+            if hwnd_val != 0 {
+                unsafe {
+                    let ex_style = GetWindowLongW(hwnd_val, GWL_EXSTYLE);
+                    let _ = SetWindowLongW(hwnd_val, GWL_EXSTYLE, ex_style | WS_EX_LAYERED);
+                    let _ = SetLayeredWindowAttributes(hwnd_val, 0, alpha, LWA_ALPHA);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (win, alpha);
+    }
 }
 
 fn clamp_cmd_size(width: u32, height: u32) -> (u32, u32) {
@@ -289,6 +328,7 @@ async fn open_cmd_size_picker(
 
     if let Some(existing) = app.get_webview_window(CMD_SIZE_PICKER_LABEL) {
         apply_target_outer_size(&existing, w, h);
+        apply_window_opacity(&existing, CMD_SIZE_PICKER_ALPHA);
         let _ = existing.unminimize();
         let _ = existing.show();
         let _ = existing.set_focus();
@@ -302,7 +342,7 @@ async fn open_cmd_size_picker(
         CMD_SIZE_PICKER_LABEL,
         tauri::WebviewUrl::App("index.html".into()),
     )
-    .title("Command Prompt - Size Preview (Drag/Resize & Click DONE)")
+    .title("Command Prompt - Size Preview (Resize & Click DONE)")
     .resizable(true)
     .decorations(true)
     .min_inner_size(300.0, 200.0)
@@ -312,6 +352,7 @@ async fn open_cmd_size_picker(
     .map_err(|e| format!("Failed to create simulated CMD window: {}", e))?;
 
     apply_target_outer_size(&win, w, h);
+    apply_window_opacity(&win, CMD_SIZE_PICKER_ALPHA);
     let _ = win.center();
 
     let app_for_event = app.clone();
@@ -354,6 +395,7 @@ async fn ready_cmd_size_picker(app: AppHandle) -> Result<CmdSizePayload, String>
     let win = app
         .get_webview_window(CMD_SIZE_PICKER_LABEL)
         .ok_or_else(|| "Simulated CMD size window is not open".to_string())?;
+    apply_window_opacity(&win, CMD_SIZE_PICKER_ALPHA);
     let _ = win.show();
     let _ = win.set_focus();
     read_clamped_outer_size(&win)
@@ -398,6 +440,26 @@ async fn cancel_cmd_size_picker(app: AppHandle) -> Result<(), String> {
         let _ = main_win.set_focus();
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn inspect_database_config(
+    project_path: String,
+    target: String,
+) -> Result<DatabaseConfigInfo, String> {
+    Ok(db_manager::inspect_database_config(&project_path, &target))
+}
+
+#[tauri::command]
+async fn test_database_connection(
+    project_path: String,
+    target: String,
+) -> Result<DatabaseTestResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        db_manager::test_database_connection(&project_path, &target)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -459,6 +521,8 @@ pub fn run() {
             start_drag_cmd_size_picker,
             confirm_cmd_size_picker,
             cancel_cmd_size_picker,
+            inspect_database_config,
+            test_database_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
