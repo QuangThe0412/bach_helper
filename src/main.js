@@ -70,6 +70,7 @@ function closeAllRegularModals() {
     'modal-auto-config',
     'modal-add-group',
     'modal-confirm-clear-log',
+    'modal-target-path-warning',
   ];
   modalIds.forEach((id) => {
     const el = document.getElementById(id);
@@ -98,6 +99,7 @@ function isAnyModalVisible() {
     'modal-add-group',
     'modal-group-run',
     'modal-confirm-clear-log',
+    'modal-target-path-warning',
   ];
   return modalIds.some((id) => isModalVisible(id));
 }
@@ -165,6 +167,10 @@ function createTabState(projectPath = '') {
     projectPath: projectPath || '',
     projectPathKey: normalizeProjectPathKeyLocal(projectPath),
     buildDir: '',
+    defaultTargetPath: '',
+    customTargetPath: null,
+    effectiveTargetPath: '',
+    targetPathValidation: null,
     targets: [],
     defaultTarget: '',
     selectedTarget: '',
@@ -202,6 +208,10 @@ function createTabState(projectPath = '') {
 function resetTabProjectState(tab) {
   if (!tab) return;
   tab.buildDir = '';
+  tab.defaultTargetPath = '';
+  tab.customTargetPath = null;
+  tab.effectiveTargetPath = '';
+  tab.targetPathValidation = null;
   tab.targets = [];
   tab.defaultTarget = '';
   tab.selectedTarget = '';
@@ -513,6 +523,7 @@ function syncUIToActiveTab() {
     inputPath.dataset.tabId = tab.id;
   }
   updateHistoryDropdown(historyListCache, tab.projectPath);
+  renderTargetPathUI(tab);
 
   // 2. Target Dropdown, Show Config, Auto Config & Build Button
   const targetSelect = document.getElementById('select-ant-target');
@@ -925,7 +936,18 @@ async function scanProjectForTab(tab, path) {
     });
     tab.selectedTarget = targetToSelect;
 
-    await inspectTargetBatFilesForTab(tab, cleanPath, tab.selectedTarget, reqSeq);
+    try {
+      const savedCustomTarget = await invoke('get_project_target_path', { projectPath: cleanPath });
+      if (tab.requestSeq !== reqSeq) return;
+      tab.customTargetPath = savedCustomTarget || null;
+    } catch (_) {
+      tab.customTargetPath = null;
+    }
+
+    await Promise.all([
+      inspectTargetBatFilesForTab(tab, cleanPath, tab.selectedTarget, reqSeq),
+      refreshTargetPathValidationForTab(tab, reqSeq),
+    ]);
     if (tab.requestSeq !== reqSeq) return;
 
     setTabFooterStatus(tab, 'Ready');
@@ -981,6 +1003,256 @@ function pruneTabBatSelections(tab) {
   }
 }
 
+function renderTargetPathUI(tab = getActiveTab()) {
+  const inputTargetDir = document.getElementById('target-build-path-input');
+  const btnBrowseTarget = document.getElementById('btn-browse-target-path');
+  const btnResetTarget = document.getElementById('btn-reset-target-path');
+  const badgeStatus = document.getElementById('badge-target-path-status');
+  const warnBar = document.getElementById('target-path-warning-bar');
+  const warnText = document.getElementById('target-path-warning-text');
+
+  const hasProject = !!(tab && tab.projectPath && tab.projectPath.trim() !== '');
+  const isBuilding = !!(tab && tab.isBuilding);
+  const val = tab ? tab.targetPathValidation : null;
+  const effectiveDisplay = hasProject
+    ? tab.effectiveTargetPath ||
+      (val && val.effective_target_path) ||
+      tab.defaultTargetPath ||
+      `${tab.projectPath}\\target`
+    : '';
+
+  if (inputTargetDir) {
+    inputTargetDir.value = effectiveDisplay;
+    inputTargetDir.disabled = !hasProject || isBuilding;
+    inputTargetDir.dataset.tabId = tab ? tab.id : '';
+    if (hasProject) {
+      const modeLabel = tab.customTargetPath ? 'Custom Target Dir' : 'Default Target Dir';
+      const defPath = tab.defaultTargetPath || `${tab.projectPath}\\target`;
+      inputTargetDir.title = `${modeLabel}: ${effectiveDisplay}\nDefault: ${defPath}`;
+    } else {
+      inputTargetDir.title = 'Select a project directory first';
+    }
+  }
+
+  if (btnBrowseTarget) {
+    btnBrowseTarget.disabled = !hasProject || isBuilding;
+  }
+  if (btnResetTarget) {
+    btnResetTarget.disabled = !hasProject || !tab.customTargetPath || isBuilding;
+  }
+
+  if (badgeStatus) {
+    if (!hasProject || !val) {
+      badgeStatus.textContent = 'PATH: N/A';
+      badgeStatus.className = 'badge badge-gray target-path-status-badge';
+      badgeStatus.title = 'Pre-build Windows CMD/BAT path length validation';
+    } else if (val.severity === 'error') {
+      const isLenErr =
+        val.estimated_cmd_line_len > val.cmd_limit ||
+        val.estimated_longest_file_path_len >= val.max_path_limit;
+      badgeStatus.textContent = isLenErr ? 'PATH: TOO LONG' : 'PATH: INVALID';
+      badgeStatus.className = 'badge badge-red target-path-status-badge';
+      badgeStatus.title = `${val.summary}\nClick for full diagnostics.`;
+    } else if (val.severity === 'warning') {
+      badgeStatus.textContent = 'PATH: WARN';
+      badgeStatus.className = 'badge badge-yellow target-path-status-badge';
+      badgeStatus.title = `${val.summary}\nClick for diagnostics.`;
+    } else {
+      badgeStatus.textContent = 'PATH: OK';
+      badgeStatus.className = 'badge badge-green target-path-status-badge';
+      const cmdNote =
+        val.estimated_cmd_line_len > 0
+          ? `Est. CMD line: ${val.estimated_cmd_line_len} / ${val.cmd_limit} chars`
+          : 'CMD line: N/A';
+      const safeCap =
+        val.max_safe_target_len !== null && val.max_safe_target_len !== undefined
+          ? ` | Max safe Target Dir: ${val.max_safe_target_len} chars`
+          : '';
+      badgeStatus.title = `${cmdNote} | Max output path: ${val.estimated_longest_file_path_len} / ${val.max_path_limit} chars${safeCap}`;
+    }
+  }
+
+  if (warnBar && warnText) {
+    if (hasProject && val && (val.severity === 'error' || val.severity === 'warning')) {
+      warnBar.style.display = 'flex';
+      warnBar.classList.toggle('is-warning', val.severity === 'warning');
+      const firstMsg =
+        (val.errors && val.errors[0]) ||
+        (val.warnings && val.warnings[0]) ||
+        val.summary ||
+        '';
+      warnText.textContent = firstMsg;
+      warnBar.title = val.summary || firstMsg;
+    } else {
+      warnBar.style.display = 'none';
+      warnText.textContent = '';
+      warnBar.title = '';
+    }
+  }
+}
+
+async function refreshTargetPathValidationForTab(tab, expectedSeq = null) {
+  if (!tab || !tab.projectPath) {
+    if (tab) {
+      tab.targetPathValidation = null;
+      if (tab.id === activeTabId) renderTargetPathUI(tab);
+    }
+    return null;
+  }
+
+  const projectPath = tab.projectPath;
+  const target = tab.selectedTarget || '';
+  const customTargetPath = tab.customTargetPath || null;
+  const reqSeq = expectedSeq !== null ? expectedSeq : tab.requestSeq || 0;
+  const jh = selectedJavaHome || (envData && envData.java_home) || null;
+
+  try {
+    const validation = await invoke('validate_target_build_path', {
+      projectPath,
+      target,
+      customTargetPath,
+      javaHome: jh,
+    });
+    if (
+      (tab.requestSeq || 0) !== reqSeq ||
+      normalizeProjectPathKeyLocal(tab.projectPath) !== normalizeProjectPathKeyLocal(projectPath)
+    ) {
+      return null;
+    }
+    tab.defaultTargetPath = validation.default_target_path || '';
+    tab.effectiveTargetPath = validation.effective_target_path || '';
+    if (validation.is_default_target) {
+      tab.customTargetPath = null;
+    }
+    tab.targetPathValidation = validation;
+    if (tab.id === activeTabId) {
+      renderTargetPathUI(tab);
+    }
+    return validation;
+  } catch (err) {
+    console.error('Validate target build path failed:', err);
+    return null;
+  }
+}
+
+async function applyTargetBuildPathForActiveTab(
+  rawPath,
+  { resetToDefault = false, explicitTab = null } = {}
+) {
+  const tab = explicitTab || getActiveTab();
+  if (!tab || !tab.projectPath) return null;
+  if (tab.isBuilding) {
+    showAlert('Build in Progress', 'Cannot change Target Dir while Ant build is running.', '[!]');
+    return null;
+  }
+
+  const jh = selectedJavaHome || (envData && envData.java_home) || null;
+  const trimmed = String(rawPath || '').trim();
+  const res = await invoke('set_project_target_path', {
+    projectPath: tab.projectPath,
+    target: tab.selectedTarget || null,
+    customTargetPath: resetToDefault || !trimmed ? null : trimmed,
+    javaHome: jh,
+  });
+
+  tab.customTargetPath = res.is_default_target ? null : res.custom_target_path || null;
+  tab.defaultTargetPath = res.default_target_path || '';
+  tab.effectiveTargetPath = res.effective_target_path || res.default_target_path || '';
+  tab.targetPathValidation = res.validation || null;
+
+  if (tab.selectedTarget) {
+    await inspectTargetBatFilesForTab(tab, tab.projectPath, tab.selectedTarget);
+  }
+  if (tab.id === activeTabId) {
+    renderTargetPathUI(tab);
+  }
+
+  if (res.validation && res.validation.is_valid) {
+    const modeLabel = res.is_default_target ? 'Default' : 'Custom';
+    setTabFooterStatus(
+      tab,
+      `Target Dir set (${modeLabel})`,
+      formatCurrentDateTime(),
+      'ok'
+    );
+  } else if (res.validation) {
+    setTabFooterStatus(tab, 'Target Dir issue', formatCurrentDateTime(), 'err');
+  }
+
+  return res;
+}
+
+function populateTargetPathWarningModal(validation) {
+  if (!validation) return;
+  const summaryEl = document.getElementById('tpw-summary');
+  const curPathEl = document.getElementById('tpw-current-path');
+  const cmdEl = document.getElementById('tpw-cmd-usage');
+  const maxPathEl = document.getElementById('tpw-max-path-usage');
+  const safeLimitEl = document.getElementById('tpw-safe-limit');
+  const offendingEl = document.getElementById('tpw-offending-script');
+  const detailsEl = document.getElementById('tpw-details-list');
+
+  if (summaryEl) {
+    summaryEl.textContent = validation.is_valid
+      ? 'Target Build Path validation passed (close to limit warning).'
+      : 'Build cannot start because the current Target Build Path will fail or exceed Windows path/CMD limits. Select a shorter Target Dir (e.g. C:\\bh_target\\batch) before building.';
+  }
+  if (curPathEl) {
+    curPathEl.textContent = `${validation.effective_target_path} (${validation.effective_target_len} chars; batch-safe: ${validation.batch_safe_target_len} chars)`;
+    curPathEl.title = validation.effective_target_path || '';
+  }
+  if (cmdEl) {
+    if (validation.estimated_cmd_line_len > 0) {
+      const state =
+        validation.estimated_cmd_line_len > validation.cmd_limit ? 'EXCEEDS LIMIT' : 'OK';
+      cmdEl.textContent = `${validation.estimated_cmd_line_len} / ${validation.cmd_limit} chars (${validation.jar_reference_count} %BATCH_HOME% JAR refs) [${state}]`;
+      cmdEl.style.color =
+        validation.estimated_cmd_line_len > validation.cmd_limit ? '#bb0000' : '#006600';
+    } else {
+      cmdEl.textContent = `N/A (no SetBatchPath.bat found; limit ${validation.cmd_limit} chars)`;
+      cmdEl.style.color = '#333333';
+    }
+  }
+  if (maxPathEl) {
+    const pathOver = validation.estimated_longest_file_path_len >= validation.max_path_limit;
+    maxPathEl.textContent = `${validation.estimated_longest_file_path_len} / ${validation.max_path_limit} chars [${pathOver ? 'EXCEEDS MAX_PATH' : 'OK'}]`;
+    maxPathEl.style.color = pathOver ? '#bb0000' : '#006600';
+  }
+  if (safeLimitEl) {
+    safeLimitEl.textContent =
+      validation.max_safe_target_len !== null && validation.max_safe_target_len !== undefined
+        ? `<= ${validation.max_safe_target_len} chars (recommended short folder without spaces, e.g. C:\\bh_target\\job)`
+        : '<= 80 chars recommended';
+  }
+  if (offendingEl) {
+    if (validation.offending_script) {
+      const lineStr = validation.offending_line_number
+        ? ` line ${validation.offending_line_number}`
+        : '';
+      offendingEl.textContent = `${validation.offending_script}${lineStr}`;
+    } else {
+      offendingEl.textContent = 'Target path check';
+    }
+  }
+  if (detailsEl) {
+    const allMsgs = [...(validation.errors || []), ...(validation.warnings || [])];
+    detailsEl.innerHTML =
+      allMsgs.length > 0
+        ? allMsgs.map((m) => `<div>- ${escapeHtml(m)}</div>`).join('')
+        : '<div>No issues detected.</div>';
+  }
+}
+
+function openTargetPathWarningModal(validation) {
+  populateTargetPathWarningModal(validation);
+  openSingleModal('modal-target-path-warning');
+}
+
+function closeTargetPathWarningModal() {
+  const el = document.getElementById('modal-target-path-warning');
+  if (el) el.style.display = 'none';
+}
+
 async function refreshDatabaseInfoForTab(tab, expectedSeq = null) {
   if (!tab || !tab.projectPath || !tab.selectedTarget) {
     if (tab) {
@@ -1024,7 +1296,11 @@ async function inspectTargetBatFilesForTab(tab, projectPath, target, expectedSeq
 
   try {
     const [inspection, dbInfo, groups] = await Promise.all([
-      invoke('inspect_build_target', { projectPath, target }),
+      invoke('inspect_build_target', {
+        projectPath,
+        target,
+        customTargetPath: tab.customTargetPath || null,
+      }),
       invoke('inspect_database_config', { projectPath, target }).catch(() => null),
       invoke('get_project_groups', { projectPath }).catch(() => tab.groups || []),
     ]);
@@ -1037,6 +1313,12 @@ async function inspectTargetBatFilesForTab(tab, projectPath, target, expectedSeq
     }
 
     tab.propertiesFile = inspection.properties_file || null;
+    if (inspection.default_target_path) {
+      tab.defaultTargetPath = inspection.default_target_path;
+    }
+    if (inspection.effective_target_path) {
+      tab.effectiveTargetPath = inspection.effective_target_path;
+    }
     tab.dbInfo = dbInfo;
     tab.groups = Array.isArray(groups) ? groups : [];
     if (tab.activeGroupId && !tab.groups.some((g) => g.id === tab.activeGroupId)) {
@@ -2543,6 +2825,31 @@ async function executeBuildForActiveTab() {
   }
 
   tab.selectedTarget = target;
+
+  const inputTargetEl = document.getElementById('target-build-path-input');
+  if (inputTargetEl && inputTargetEl.dataset.tabId === tab.id) {
+    const typedVal = (inputTargetEl.value || '').trim();
+    const currentEff = (tab.effectiveTargetPath || '').trim();
+    if (typedVal.replace(/\//g, '\\').toLowerCase() !== currentEff.replace(/\//g, '\\').toLowerCase()) {
+      try {
+        await applyTargetBuildPathForActiveTab(typedVal, {
+          resetToDefault: typedVal === '',
+          explicitTab: tab,
+        });
+      } catch (err) {
+        showAlert('Target Path Error', escapeHtml(String(err)), '[X]');
+        return;
+      }
+    }
+  }
+
+  const validation = await refreshTargetPathValidationForTab(tab);
+  if (validation && !validation.is_valid) {
+    setTabFooterStatus(tab, 'Build blocked (Target Path)', formatCurrentDateTime(), 'err');
+    openTargetPathWarningModal(validation);
+    return;
+  }
+
   tab.isBuilding = true;
   tab.cmdPanelOpen = true;
   tab.buildStatus = 'BUILDING...';
@@ -2558,6 +2865,7 @@ async function executeBuildForActiveTab() {
 
   const buildProjectPath = tab.projectPath;
   const buildTarget = target;
+  const buildCustomTarget = tab.customTargetPath || null;
   const buildSeq = tab.requestSeq || 0;
 
   try {
@@ -2567,6 +2875,7 @@ async function executeBuildForActiveTab() {
       target: buildTarget,
       antExecutable: selectedAntPath,
       javaHome: selectedJavaHome,
+      customTargetPath: buildCustomTarget,
     });
 
     if (
@@ -2575,6 +2884,8 @@ async function executeBuildForActiveTab() {
       (tab.requestSeq || 0) === buildSeq
     ) {
       tab.propertiesFile = res.properties_file || tab.propertiesFile || null;
+      if (res.default_target_path) tab.defaultTargetPath = res.default_target_path;
+      if (res.effective_target_path) tab.effectiveTargetPath = res.effective_target_path;
       tab.batFolder = res.bat_folder || '';
       tab.batchLogName = res.batch_log_name || tab.batchLogName || null;
       tab.appLogName = res.app_log_name || tab.appLogName || null;
@@ -2930,6 +3241,7 @@ async function openConfigPropertiesDirect() {
       const inspection = await invoke('inspect_build_target', {
         projectPath: tab.projectPath,
         target: tab.selectedTarget,
+        customTargetPath: tab.customTargetPath || null,
       });
       tab.propertiesFile = inspection.properties_file || null;
       propFile = tab.propertiesFile;
@@ -2972,6 +3284,7 @@ async function refreshAutoConfigChecks() {
   const winDetail = document.getElementById('autoconfig-check-window-detail');
   const projEl = document.getElementById('autoconfig-project-path');
   const tgtEl = document.getElementById('autoconfig-target-name');
+  const tgtDirEl = document.getElementById('autoconfig-target-dir');
   const javaHomeEl = document.getElementById('autoconfig-java-home');
   const propEl = document.getElementById('autoconfig-prop-file');
   const summaryEl = document.getElementById('autoconfig-summary-note');
@@ -2985,6 +3298,14 @@ async function refreshAutoConfigChecks() {
     projEl.title = projEl.textContent;
   }
   if (tgtEl) tgtEl.textContent = (tab && tab.selectedTarget) || '(None)';
+  if (tgtDirEl) {
+    const effDir = tab
+      ? tab.effectiveTargetPath || tab.defaultTargetPath || (tab.projectPath ? `${tab.projectPath}\\target` : '-')
+      : '-';
+    const modeSuffix = tab && tab.projectPath ? (tab.customTargetPath ? ' (Custom)' : ' (Default)') : '';
+    tgtDirEl.textContent = tab && tab.projectPath ? `${effDir}${modeSuffix}` : '-';
+    tgtDirEl.title = effDir;
+  }
   if (javaHomeEl) javaHomeEl.textContent = 'Checking...';
   if (propEl) propEl.textContent = 'Checking...';
   if (summaryEl) summaryEl.textContent = 'Checking Ant, Java, and Window Size settings...';
@@ -2996,6 +3317,7 @@ async function refreshAutoConfigChecks() {
       ? invoke('inspect_build_target', {
           projectPath: tab.projectPath,
           target: tab.selectedTarget,
+          customTargetPath: tab.customTargetPath || null,
         })
       : Promise.resolve(null);
 
@@ -3093,7 +3415,7 @@ async function refreshAutoConfigChecks() {
         summaryEl.style.display = 'block';
         summaryEl.textContent =
           'Select a project directory and target package first before applying Auto Config.';
-      } else if (antOk && javaOk && winOk) {
+      } else if (antOk && javaOk && winOk && (!tab.targetPathValidation || tab.targetPathValidation.is_valid)) {
         summaryEl.style.display = 'none';
         summaryEl.textContent = '';
       } else {
@@ -3101,9 +3423,17 @@ async function refreshAutoConfigChecks() {
         if (!antOk) missing.push('Apache Ant');
         if (!javaOk) missing.push('Java (JDK)');
         if (!winOk) missing.push('Window Size');
+        const notes = [];
+        if (missing.length > 0) {
+          notes.push(
+            `Warning: [${missing.join(', ')}] not ready. Use Config / Setting above to resolve, or apply path updates now.`
+          );
+        }
+        if (tab.targetPathValidation && !tab.targetPathValidation.is_valid) {
+          notes.push(`Target Path Warning: ${tab.targetPathValidation.summary}`);
+        }
         summaryEl.style.display = 'block';
-        summaryEl.textContent =
-          `Warning: [${missing.join(', ')}] not ready. Use Config / Setting above to resolve, or apply path updates now.`;
+        summaryEl.textContent = notes.join('\n');
       }
     }
   } catch (err) {
@@ -3227,13 +3557,128 @@ function setupUIEvents() {
     await triggerPathScan(inputPathEl.dataset.tabId || activeTabId);
   });
 
+  // 3b. Target Build Path Configuration & Validation Controls
+  const inputTargetDirEl = document.getElementById('target-build-path-input');
+  let lastSubmittedTargetDir = '';
+  const commitTargetPathInput = async (explicitTabId = null) => {
+    const ownerTab = (explicitTabId && getTabById(explicitTabId)) || getActiveTab();
+    if (!ownerTab || !ownerTab.projectPath) return;
+    const rawVal = inputTargetDirEl ? (inputTargetDirEl.value || '').trim() : '';
+    if (
+      rawVal &&
+      lastSubmittedTargetDir &&
+      rawVal.toLowerCase() === lastSubmittedTargetDir.toLowerCase()
+    ) {
+      return;
+    }
+    const curEff = (ownerTab.effectiveTargetPath || '').trim();
+    if (
+      rawVal &&
+      rawVal.replace(/\//g, '\\').toLowerCase() === curEff.replace(/\//g, '\\').toLowerCase()
+    ) {
+      return;
+    }
+    lastSubmittedTargetDir = rawVal;
+    try {
+      await applyTargetBuildPathForActiveTab(rawVal, {
+        resetToDefault: rawVal === '',
+        explicitTab: ownerTab,
+      });
+    } catch (err) {
+      showAlert('Target Dir Error', escapeHtml(String(err)), '[X]');
+    }
+  };
+
+  if (inputTargetDirEl) {
+    inputTargetDirEl.addEventListener('focus', () => {
+      inputTargetDirEl.dataset.tabId = activeTabId;
+    });
+    inputTargetDirEl.addEventListener('input', () => {
+      lastSubmittedTargetDir = '';
+    });
+    inputTargetDirEl.addEventListener('keydown', async (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        await commitTargetPathInput(activeTabId);
+      }
+    });
+    inputTargetDirEl.addEventListener('change', async () => {
+      await commitTargetPathInput(inputTargetDirEl.dataset.tabId || activeTabId);
+    });
+  }
+
+  const pickCustomTargetDir = async () => {
+    const tab = getActiveTab();
+    if (!tab || !tab.projectPath) return null;
+    try {
+      const folder = await invoke('pick_folder');
+      if (!folder) return null;
+      lastSubmittedTargetDir = folder;
+      return await applyTargetBuildPathForActiveTab(folder, { explicitTab: tab });
+    } catch (err) {
+      showAlert('Target Dir Error', escapeHtml(String(err)), '[X]');
+      return null;
+    }
+  };
+
+  document.getElementById('btn-browse-target-path').addEventListener('click', async () => {
+    await pickCustomTargetDir();
+  });
+
+  document.getElementById('btn-reset-target-path').addEventListener('click', async () => {
+    const tab = getActiveTab();
+    if (!tab || !tab.projectPath) return;
+    lastSubmittedTargetDir = '';
+    try {
+      await applyTargetBuildPathForActiveTab(null, { resetToDefault: true, explicitTab: tab });
+    } catch (err) {
+      showAlert('Target Dir Error', escapeHtml(String(err)), '[X]');
+    }
+  });
+
+  document.getElementById('btn-fix-target-path-inline').addEventListener('click', async () => {
+    const tab = getActiveTab();
+    if (tab && tab.targetPathValidation) {
+      openTargetPathWarningModal(tab.targetPathValidation);
+    } else {
+      await pickCustomTargetDir();
+    }
+  });
+
+  document.getElementById('badge-target-path-status').addEventListener('click', () => {
+    const tab = getActiveTab();
+    if (tab && tab.targetPathValidation) {
+      openTargetPathWarningModal(tab.targetPathValidation);
+    }
+  });
+
+  document.getElementById('btn-close-modal-target-warning').addEventListener('click', closeTargetPathWarningModal);
+  document.getElementById('modal-btn-close-target-warning').addEventListener('click', closeTargetPathWarningModal);
+  document.getElementById('modal-btn-pick-shorter-target').addEventListener('click', async () => {
+    const res = await pickCustomTargetDir();
+    if (!res) return;
+    if (res.validation && res.validation.is_valid) {
+      closeTargetPathWarningModal();
+      showAlert(
+        'Target Dir Updated',
+        `<b>Target Dir:</b> ${escapeHtml(res.effective_target_path)}<br><b>Status:</b> ${escapeHtml(res.validation.summary)}`,
+        '[OK]'
+      );
+    } else if (res.validation) {
+      populateTargetPathWarningModal(res.validation);
+    }
+  });
+
   // 4. Target selection change
   document.getElementById('select-ant-target').addEventListener('change', async (e) => {
     const tab = getActiveTab();
     if (!tab) return;
     tab.selectedTarget = e.target.value;
     if (tab.projectPath && tab.selectedTarget) {
-      await inspectTargetBatFilesForTab(tab, tab.projectPath, tab.selectedTarget);
+      await Promise.all([
+        inspectTargetBatFilesForTab(tab, tab.projectPath, tab.selectedTarget),
+        refreshTargetPathValidationForTab(tab),
+      ]);
     }
   });
 
@@ -3281,6 +3726,7 @@ function setupUIEvents() {
         projectPath: tab.projectPath,
         target: tab.selectedTarget || null,
         fileName: fileName,
+        customTargetPath: tab.customTargetPath || null,
       });
     } catch (err) {
       const formatted = escapeHtml(String(err)).replace(/\n/g, '<br>');
@@ -3483,6 +3929,7 @@ function setupUIEvents() {
         logFolderPath: tab.logFolder || null,
         batchLogName: tab.batchLogName || null,
         appLogName: tab.appLogName || null,
+        customTargetPath: tab.customTargetPath || null,
       });
       const clearedCount = (clearRes && clearRes.cleared_files && clearRes.cleared_files.length) || 0;
       const failedList = (clearRes && clearRes.failed_files) || [];
@@ -3523,9 +3970,11 @@ function setupUIEvents() {
     if (msgEl) {
       const targetNote = tab.logFolder
         ? escapeHtml(tab.logFolder)
-        : tab.projectPath
-          ? `${escapeHtml(tab.projectPath)}\\target\\log`
-          : '(No project selected)';
+        : tab.effectiveTargetPath
+          ? `${escapeHtml(tab.effectiveTargetPath)}\\log`
+          : tab.projectPath
+            ? `${escapeHtml(tab.projectPath)}\\target\\log`
+            : '(No project selected)';
       msgEl.innerHTML =
         `Clear all displayed CMD logs and truncate all <b>.log</b> files inside:<br>` +
         `<span class="text-mono">${targetNote}</span><br><br>` +
@@ -3922,9 +4371,13 @@ function setupUIEvents() {
         projectPath: tab.projectPath,
         target: tab.selectedTarget,
         javaHome: jh,
+        customTargetPath: tab.customTargetPath || null,
       });
 
-      await inspectTargetBatFilesForTab(tab, tab.projectPath, tab.selectedTarget);
+      await Promise.all([
+        inspectTargetBatFilesForTab(tab, tab.projectPath, tab.selectedTarget),
+        refreshTargetPathValidationForTab(tab),
+      ]);
       closeAutoConfigModal();
       const formatted = escapeHtml(res.message || 'Auto Config complete.').replace(/\n/g, '<br>');
       showAlert('Auto Config Complete', formatted, '[OK]');
@@ -4112,6 +4565,13 @@ function setupUIEvents() {
       return;
     }
 
+    if (isModalVisible('modal-target-path-warning')) {
+      closeTargetPathWarningModal();
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
     if (isModalVisible('modal-confirm-clear-log')) {
       closeClearLogConfirmModal();
       e.preventDefault();
@@ -4228,6 +4688,10 @@ function setupUIEvents() {
       const updatedEnv = await invoke('set_java_env_quick', { javaPath: targetPath });
       userManuallyPickedJdk = false;
       renderEnvironmentUI(updatedEnv);
+      const curTab = getActiveTab();
+      if (curTab && curTab.projectPath) {
+        await refreshTargetPathValidationForTab(curTab);
+      }
       showAlert(
         'Environment Updated',
         `<b>JAVA_HOME:</b> ${updatedEnv.java_home || 'Set'}<br><b>where java:</b> ${updatedEnv.java_where_path || 'Configured'}`,

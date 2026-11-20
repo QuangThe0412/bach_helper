@@ -11,6 +11,11 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter};
 
+pub const WINDOWS_CMD_LINE_LIMIT: usize = 8191;
+pub const WINDOWS_CMD_LINE_WARN: usize = 7600;
+pub const WINDOWS_MAX_PATH_LIMIT: usize = 260;
+pub const WINDOWS_MAX_PATH_WARN: usize = 235;
+
 static PS_SCRIPT_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(windows)]
@@ -39,6 +44,9 @@ pub struct BuildResult {
     pub target: String,
     pub properties_file: Option<String>,
     pub base_directory: Option<String>,
+    pub default_target_path: Option<String>,
+    pub effective_target_path: Option<String>,
+    pub is_default_target: bool,
     pub bat_folder: Option<String>,
     pub bat_files: Vec<BatFileInfo>,
     pub batch_log_name: Option<String>,
@@ -52,6 +60,9 @@ pub struct BuildResult {
 pub struct PostBuildInspection {
     pub properties_file: Option<String>,
     pub base_directory: Option<String>,
+    pub default_target_path: Option<String>,
+    pub effective_target_path: Option<String>,
+    pub is_default_target: bool,
     pub bat_folder: Option<String>,
     pub bat_files: Vec<BatFileInfo>,
     pub batch_log_name: Option<String>,
@@ -59,6 +70,48 @@ pub struct PostBuildInspection {
     pub log_file_path: Option<String>,
     pub app_log_file_path: Option<String>,
     pub log_folder_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AntTargetProperties {
+    pub target_prop_name: String,
+    pub build_classes_prop_name: String,
+    pub default_target_path: String,
+    pub env_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TargetPathValidation {
+    pub is_valid: bool,
+    pub is_default_target: bool,
+    pub default_target_path: String,
+    pub effective_target_path: String,
+    pub batch_safe_target_path: String,
+    pub effective_target_len: usize,
+    pub batch_safe_target_len: usize,
+    pub cmd_limit: usize,
+    pub max_path_limit: usize,
+    pub estimated_cmd_line_len: usize,
+    pub estimated_longest_file_path_len: usize,
+    pub max_safe_target_len: Option<usize>,
+    pub offending_script: Option<String>,
+    pub offending_line_number: Option<usize>,
+    pub jar_reference_count: usize,
+    pub severity: String,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetTargetPathResult {
+    pub custom_target_path: Option<String>,
+    pub effective_target_path: String,
+    pub default_target_path: String,
+    pub is_default_target: bool,
+    pub properties_updated: bool,
+    pub properties_file: Option<String>,
+    pub validation: TargetPathValidation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -638,13 +691,880 @@ pub fn fix_build_xml_java_path(build_dir: &Path, active_java_home: &str) -> Opti
     changed_to
 }
 
-/// Check and fix project paths & all Java Home keys in the target's .properties file.
-/// Uses Windows 8.3 short paths for space/non-ASCII segments and `\uXXXX` escaping so Java's
-/// `Properties.load(InputStream)` & Ant `<filterset>` never corrupt Japanese characters into `????`.
-pub fn fix_properties_file_paths(
+fn lexical_normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(p) => out.push(p.as_os_str()),
+            Component::RootDir => out.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let can_pop = out
+                    .components()
+                    .last()
+                    .map(|c| matches!(c, Component::Normal(_)))
+                    .unwrap_or(false);
+                if can_pop {
+                    out.pop();
+                }
+            }
+            Component::Normal(seg) => out.push(seg),
+        }
+    }
+    out
+}
+
+fn format_display_windows_path(path: &Path) -> String {
+    let s = path.to_string_lossy().replace('/', "\\");
+    let is_drive_root = s.len() == 3 && s.as_bytes().get(1) == Some(&b':') && s.ends_with('\\');
+    if is_drive_root {
+        s
+    } else if s.starts_with(r"\\") {
+        let rest = s.trim_end_matches('\\');
+        if rest.len() > 2 {
+            rest.to_string()
+        } else {
+            s
+        }
+    } else {
+        s.trim_end_matches('\\').to_string()
+    }
+}
+
+/// Inspect `build.xml` to identify the target output property (`target.dir` / `TARGET_HOME`),
+/// compiled classes property (`build.dir`), resolved default target path, and optional `env.dir`.
+pub fn detect_ant_target_properties(
+    project_path: &str,
+    target: Option<&str>,
+) -> AntTargetProperties {
+    let clean_proj = project_path.trim().trim_matches('"').replace('/', "\\");
+    let base_proj = Path::new(&clean_proj);
+    let fallback_default =
+        format_display_windows_path(&lexical_normalize_path(&base_proj.join("target")));
+
+    let mut target_prop_name = "target.dir".to_string();
+    let mut build_classes_prop_name = "build.dir".to_string();
+    let mut default_target_path = fallback_default;
+    let mut env_dir: Option<String> = None;
+
+    if let Some(build_dir) = find_build_dir(&clean_proj) {
+        let build_xml_path = build_dir.join("build.xml");
+        if let Ok(bytes) = fs::read(&build_xml_path) {
+            let (content, _) = detect_and_decode_text(&bytes);
+            let mut in_any_target = false;
+            let mut in_requested_target = false;
+            let mut matched_target_prop = false;
+
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("<!--") {
+                    continue;
+                }
+                if trimmed.starts_with("<target") {
+                    in_any_target = true;
+                    if let Some(req_tgt) = target {
+                        let t_clean = req_tgt.trim();
+                        if !t_clean.is_empty()
+                            && extract_xml_attribute(trimmed, "name")
+                                .map(|n| n.eq_ignore_ascii_case(t_clean))
+                                .unwrap_or(false)
+                        {
+                            in_requested_target = true;
+                        }
+                    }
+                    continue;
+                }
+                if trimmed.starts_with("</target>") {
+                    in_any_target = false;
+                    in_requested_target = false;
+                    continue;
+                }
+
+                if trimmed.contains("<property") {
+                    if let (Some(name), Some(val)) = (
+                        extract_xml_attribute(trimmed, "name"),
+                        extract_xml_attribute(trimmed, "value"),
+                    ) {
+                        let name_trimmed = name.trim();
+                        let name_lower = name_trimmed.to_lowercase();
+                        let val_trimmed = val.trim();
+                        let val_norm_slash = val_trimmed
+                            .replace('\\', "/")
+                            .trim_end_matches('/')
+                            .to_string();
+                        let val_lower = val_norm_slash.to_lowercase();
+
+                        if !in_any_target {
+                            let is_known_target_name = matches!(
+                                name_lower.as_str(),
+                                "target.dir"
+                                    | "target_home"
+                                    | "target.home"
+                                    | "dist.dir"
+                                    | "target.root"
+                            );
+                            let is_target_val = !matched_target_prop
+                                && !name_lower.contains("build")
+                                && !name_lower.contains("class")
+                                && (val_lower == "target" || val_lower.ends_with("/target"));
+
+                            if is_known_target_name || is_target_val {
+                                target_prop_name = name_trimmed.to_string();
+                                matched_target_prop = true;
+                                if !val_trimmed.contains("${") && !val_trimmed.is_empty() {
+                                    let val_win = val_trimmed.replace('/', "\\");
+                                    let p = Path::new(&val_win);
+                                    let resolved = if p.is_absolute() {
+                                        lexical_normalize_path(p)
+                                    } else {
+                                        lexical_normalize_path(&build_dir.join(p))
+                                    };
+                                    default_target_path = format_display_windows_path(&resolved);
+                                }
+                            } else if name_lower == "build.dir"
+                                || val_lower.ends_with("/target/classes")
+                                || val_lower.contains("}/classes")
+                            {
+                                build_classes_prop_name = name_trimmed.to_string();
+                            }
+                        } else if in_requested_target && name_lower == "env.dir" {
+                            let cleaned_env =
+                                val_trimmed.replace('\\', "/").trim_matches('/').to_string();
+                            if !cleaned_env.is_empty() {
+                                env_dir = Some(cleaned_env);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    AntTargetProperties {
+        target_prop_name,
+        build_classes_prop_name,
+        default_target_path,
+        env_dir,
+    }
+}
+
+/// Resolve `(effective_target_dir, default_target_dir, is_default_target)`.
+/// Falls back cleanly to `default_target_dir` when `custom_target_path` is empty or matches default.
+pub fn resolve_effective_target_dir(
+    project_path: &str,
+    target: Option<&str>,
+    custom_target_path: Option<&str>,
+) -> (PathBuf, PathBuf, bool) {
+    let ant_props = detect_ant_target_properties(project_path, target);
+    let default_pb = lexical_normalize_path(Path::new(&ant_props.default_target_path));
+
+    let Some(raw_custom) = custom_target_path else {
+        return (default_pb.clone(), default_pb, true);
+    };
+    let trimmed = raw_custom.trim().trim_matches('"');
+    if trimmed.is_empty() {
+        return (default_pb.clone(), default_pb, true);
+    }
+
+    let custom_pb = lexical_normalize_path(Path::new(&trimmed.replace('/', "\\")));
+    let custom_long = resolve_long_path_best_effort(&custom_pb);
+    let default_long = resolve_long_path_best_effort(&default_pb);
+
+    if paths_equal_ci(&custom_pb, &default_pb) || paths_equal_ci(&custom_long, &default_long) {
+        (default_pb.clone(), default_pb, true)
+    } else {
+        (custom_pb, default_pb, false)
+    }
+}
+
+fn find_source_set_batch_path(base_proj: &Path) -> Option<PathBuf> {
+    let direct_candidates = [
+        base_proj.join("batch").join("SetBatchPath.bat"),
+        base_proj.join("batch").join("SetBatchPath.bat.filter"),
+        base_proj
+            .join("batch")
+            .join("batfiles")
+            .join("SetBatchPath.bat.filter"),
+        base_proj
+            .join("batch")
+            .join("batfiles")
+            .join("SetBatchPath.bat"),
+    ];
+    for c in direct_candidates {
+        if c.is_file() {
+            return Some(c);
+        }
+    }
+
+    let batch_dir = base_proj.join("batch");
+    if batch_dir.is_dir() {
+        for entry in walkdir::WalkDir::new(&batch_dir)
+            .max_depth(4)
+            .into_iter()
+            .flatten()
+        {
+            if entry.file_type().is_file() {
+                let lower = entry.file_name().to_string_lossy().to_lowercase();
+                if lower == "setbatchpath.bat" || lower == "setbatchpath.bat.filter" {
+                    return Some(entry.path().to_path_buf());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn expand_cmd_percent_vars(
+    line: &str,
+    vars: &std::collections::HashMap<String, String>,
+    undefined_to_empty: bool,
+) -> String {
+    let mut out = String::with_capacity(line.len());
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] == '%' {
+            if let Some(rel_end) = chars[i + 1..].iter().position(|&c| c == '%') {
+                if rel_end == 0 {
+                    out.push('%');
+                    i += 2;
+                    continue;
+                }
+                let var_name: String = chars[i + 1..i + 1 + rel_end].iter().collect();
+                if let Some(val) = vars.get(&var_name.to_lowercase()) {
+                    out.push_str(val);
+                } else if !undefined_to_empty {
+                    out.push('%');
+                    out.push_str(&var_name);
+                    out.push('%');
+                }
+                i += rel_end + 2;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+
+    out
+}
+
+fn extract_windows_drive_prefix(path: &Path) -> Option<String> {
+    use std::path::Component;
+    for comp in path.components() {
+        if let Component::Prefix(p) = comp {
+            let s = p.as_os_str().to_string_lossy().to_string();
+            if s.len() == 2 && s.ends_with(':') {
+                return Some(format!("{}\\", s));
+            }
+        }
+    }
+    None
+}
+
+fn is_protected_windows_directory(cand: &Path) -> bool {
+    let cand_norm = resolve_long_path_best_effort(cand);
+    let mut protected: Vec<PathBuf> = vec![
+        PathBuf::from(r"C:\"),
+        PathBuf::from(r"C:\Windows"),
+        PathBuf::from(r"C:\Program Files"),
+        PathBuf::from(r"C:\Program Files (x86)"),
+        PathBuf::from(r"C:\Users"),
+    ];
+    for var in [
+        "WINDIR",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "ProgramData",
+    ] {
+        if let Ok(v) = std::env::var(var) {
+            if !v.trim().is_empty() {
+                let p = PathBuf::from(v.trim());
+                protected.push(p.clone());
+                if var == "USERPROFILE" {
+                    protected.push(p.join("Desktop"));
+                    protected.push(p.join("Documents"));
+                }
+            }
+        }
+    }
+    protected.iter().any(|p| paths_equal_ci(&cand_norm, p))
+}
+
+fn check_target_path_safety(
+    effective_pb: &Path,
+    effective_str: &str,
+    batch_safe_target_path: &str,
+    base_proj: &Path,
+    is_default_target: bool,
+    errors: &mut Vec<String>,
+) {
+    let trimmed = effective_str.trim();
+    if trimmed.is_empty() {
+        errors.push("Target build path cannot be empty.".to_string());
+        return;
+    }
+
+    if !effective_pb.is_absolute() {
+        errors.push(format!(
+            "Target build path must be an absolute path (for example, C:\\bh_target\\project): '{}'.",
+            effective_str
+        ));
+        return;
+    }
+
+    // Check normal path segments for illegal Windows filename chars or risky CMD metacharacters
+    let mut seg_idx = 0usize;
+    for comp in effective_pb.components() {
+        if let std::path::Component::Normal(os_seg) = comp {
+            let seg = os_seg.to_string_lossy();
+            let bad_win_char = seg
+                .chars()
+                .find(|c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*') || c.is_control());
+            if let Some(ch) = bad_win_char {
+                errors.push(format!(
+                    "Target build path contains invalid Windows filename character '{}' in '{}'.",
+                    ch, seg
+                ));
+                break;
+            }
+            if !is_default_target {
+                let bad_cmd_char = seg
+                    .chars()
+                    .find(|c| matches!(c, '&' | '^' | '%' | '!' | ';' | '='));
+                if let Some(ch) = bad_cmd_char {
+                    errors.push(format!(
+                        "Custom target build path contains CMD shell metacharacter '{}' in '{}', which can break Ant/BAT argument parsing.",
+                        ch, seg
+                    ));
+                    break;
+                }
+            }
+            seg_idx += 1;
+        }
+    }
+
+    if seg_idx == 0 {
+        errors.push(format!(
+            "Target build path cannot be a drive or share root ('{}') because Ant build runs <delete dir=\"${{target.dir}}\" />.",
+            effective_str
+        ));
+    }
+
+    if effective_pb.is_file() {
+        errors.push(format!(
+            "Target build path points to an existing file instead of a directory: '{}'.",
+            effective_str
+        ));
+    }
+
+    #[cfg(windows)]
+    if let Some(drive_root) = extract_windows_drive_prefix(effective_pb) {
+        if !Path::new(&drive_root).exists() {
+            errors.push(format!(
+                "Drive '{}' does not exist on this system.",
+                drive_root
+            ));
+        }
+    }
+
+    if is_protected_windows_directory(effective_pb) {
+        errors.push(format!(
+            "Target build path '{}' points to a protected Windows/system directory and cannot be used as Ant target output.",
+            effective_str
+        ));
+    }
+
+    let proj_resolved = resolve_long_path_best_effort(base_proj);
+    let eff_resolved = resolve_long_path_best_effort(effective_pb);
+    if is_path_within_dir(&proj_resolved, &eff_resolved) {
+        errors.push(format!(
+            "Target build path '{}' cannot be the project root or an ancestor folder because Ant <delete> would erase project files.",
+            effective_str
+        ));
+    }
+
+    for protected_sub in ["src", "build", "batch"] {
+        if is_path_within_dir(&eff_resolved, &proj_resolved.join(protected_sub)) {
+            errors.push(format!(
+                "Target build path '{}' cannot point inside source folder '{}'.",
+                effective_str, protected_sub
+            ));
+        }
+    }
+
+    if !is_default_target
+        && (batch_safe_target_path.contains(' ') || !batch_safe_target_path.is_ascii())
+    {
+        errors.push(format!(
+            "Custom target build path '{}' contains spaces or non-ASCII characters (batch-safe: '{}'). Choose a short ASCII path without spaces (e.g. C:\\bh_target\\batch1) so unquoted %BATCH_HOME% paths in Windows .bat scripts execute safely.",
+            effective_str, batch_safe_target_path
+        ));
+    }
+}
+
+fn strip_case_insensitive_suffix<'a>(s: &'a str, suffix: &str) -> &'a str {
+    let s_len = s.len();
+    let suf_len = suffix.len();
+    if s_len >= suf_len
+        && s.is_char_boundary(s_len - suf_len)
+        && s[s_len - suf_len..].eq_ignore_ascii_case(suffix)
+    {
+        &s[..s_len - suf_len]
+    } else {
+        s
+    }
+}
+
+fn estimate_longest_output_suffix(
+    base_proj: &Path,
+    env_dir: Option<&str>,
+    artifact_id: &str,
+) -> usize {
+    let env_prefix_len = env_dir
+        .map(|ed| ed.trim_matches('/'))
+        .filter(|s| !s.is_empty())
+        .map(|s| s.encode_utf16().count() + 1)
+        .unwrap_or(0);
+
+    let mut max_env_rel: usize = "batch/SetBatchPath.bat.filter"
+        .len()
+        .max("log/stclibApp.log".len());
+    max_env_rel = max_env_rel.max(format!("{}.jar", artifact_id).encode_utf16().count());
+
+    let batch_dir = base_proj.join("batch");
+    if batch_dir.is_dir() {
+        for entry in walkdir::WalkDir::new(&batch_dir).into_iter().flatten() {
+            if entry.file_type().is_file() {
+                if let Ok(rel) = entry.path().strip_prefix(&batch_dir) {
+                    let rel_str = rel.to_string_lossy().replace('\\', "/");
+                    let lower = rel_str.to_lowercase();
+                    if lower.starts_with("classes/")
+                        || lower.starts_with("trush/")
+                        || lower.starts_with("table_sql_oracle/")
+                    {
+                        continue;
+                    }
+                    let rel_len = if lower.starts_with("lib/") {
+                        // Copied directly to <target>/<env_dir>/lib/<name>
+                        rel_str.encode_utf16().count()
+                    } else if lower.ends_with(".filter") {
+                        "batch/".len()
+                            + strip_case_insensitive_suffix(&rel_str, ".filter")
+                                .encode_utf16()
+                                .count()
+                    } else {
+                        "batch/".len() + rel_str.encode_utf16().count()
+                    };
+                    max_env_rel = max_env_rel.max(rel_len);
+                }
+            }
+        }
+    }
+
+    // Compiled classes are written directly under ${build.dir} (target/classes), without env.dir
+    let mut max_classes_rel: usize = 0;
+    let src_dir = base_proj.join("src");
+    if src_dir.is_dir() {
+        for entry in walkdir::WalkDir::new(&src_dir).into_iter().flatten() {
+            if entry.file_type().is_file() {
+                let is_java = entry
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("java"))
+                    .unwrap_or(false);
+                if !is_java {
+                    continue;
+                }
+                if let Ok(rel) = entry.path().strip_prefix(&src_dir) {
+                    let rel_str = rel.to_string_lossy().replace('\\', "/");
+                    let lower = rel_str.to_lowercase();
+                    let pkg_rel = if lower.starts_with("main/java/") {
+                        &rel_str["main/java/".len()..]
+                    } else if lower.starts_with("test/java/") {
+                        &rel_str["test/java/".len()..]
+                    } else {
+                        &rel_str
+                    };
+                    let class_rel_len = strip_case_insensitive_suffix(pkg_rel, ".java")
+                        .encode_utf16()
+                        .count()
+                        + ".class".len();
+                    max_classes_rel = max_classes_rel.max("classes/".len() + class_rel_len);
+                }
+            }
+        }
+    }
+
+    (max_env_rel + env_prefix_len).max(max_classes_rel)
+}
+
+/// Validate effective target build path BEFORE Ant runs, simulating Windows CMD `%VAR%` expansion
+/// against `SetBatchPath.bat` / `.bat` scripts (8,191-char limit) and Windows `MAX_PATH` (260 chars).
+pub fn validate_target_build_path(
+    project_path: &str,
+    target: &str,
+    custom_target_path: Option<&str>,
+    java_home: Option<&str>,
+) -> TargetPathValidation {
+    let clean_proj = project_path.trim().trim_matches('"').replace('/', "\\");
+    let base_proj = Path::new(&clean_proj);
+    let ant_props = detect_ant_target_properties(&clean_proj, Some(target));
+    let (effective_pb, default_pb, is_default_target) =
+        resolve_effective_target_dir(&clean_proj, Some(target), custom_target_path);
+
+    let default_target_path = format_display_windows_path(&default_pb);
+    let effective_target_path = format_display_windows_path(&effective_pb);
+
+    let batch_safe_raw = to_batch_safe_path(&effective_target_path);
+    let batch_safe_target_path = if batch_safe_raw.is_empty() {
+        effective_target_path.replace('\\', "/")
+    } else {
+        batch_safe_raw
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string()
+    };
+
+    let effective_target_len = effective_target_path.encode_utf16().count();
+    let batch_safe_target_len = batch_safe_target_path.encode_utf16().count();
+
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    check_target_path_safety(
+        &effective_pb,
+        &effective_target_path,
+        &batch_safe_target_path,
+        base_proj,
+        is_default_target,
+        &mut errors,
+    );
+
+    let prop_file =
+        find_build_dir(&clean_proj).and_then(|bd| find_properties_for_target(&bd, target));
+
+    let effective_java_raw = resolve_active_java_home(java_home)
+        .or_else(|| {
+            prop_file
+                .as_ref()
+                .and_then(|p| extract_property_value(p, "filter.javahome.baseDirectory.value"))
+        })
+        .or_else(|| {
+            prop_file
+                .as_ref()
+                .and_then(|p| extract_property_value(p, "filter.shellscript.javaHome.value"))
+        })
+        .unwrap_or_else(|| "C:/jdk-25.0.2".to_string());
+    let batch_safe_java_raw = to_batch_safe_path(&effective_java_raw);
+    let effective_java_slash = if batch_safe_java_raw.is_empty() {
+        effective_java_raw
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string()
+    } else {
+        batch_safe_java_raw
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string()
+    };
+
+    let artifact_id = prop_file
+        .as_ref()
+        .and_then(|p| extract_property_value(p, "artifactId"))
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            base_proj
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "batch-app".to_string());
+
+    let mut sim_vars: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    sim_vars.insert("java_home".to_string(), effective_java_slash.clone());
+    sim_vars.insert("batch_home".to_string(), batch_safe_target_path.clone());
+    sim_vars.insert("batchf_home".to_string(), batch_safe_target_path.clone());
+
+    let mut jar_reference_count: usize = 0;
+    let mut peak_set_line_len: usize = 0;
+    let mut set_over_line: Option<(usize, usize)> = None;
+    let mut set_batch_name: Option<String> = None;
+
+    if let Some(set_path) = find_source_set_batch_path(base_proj) {
+        set_batch_name = set_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string());
+        if let Ok(bytes) = fs::read(&set_path) {
+            let (content, _) = detect_and_decode_text(&bytes);
+            for (idx, raw_line) in content.lines().enumerate() {
+                let trimmed = raw_line.trim();
+                let lower = trimmed.to_lowercase();
+                if trimmed.is_empty()
+                    || lower == "rem"
+                    || lower.starts_with("rem ")
+                    || lower.starts_with("rem\t")
+                    || trimmed.starts_with("::")
+                {
+                    continue;
+                }
+
+                let filtered = raw_line
+                    .replace(
+                        "@filter.shellscript.baseDirectory.value@",
+                        &batch_safe_target_path,
+                    )
+                    .replace(
+                        "@filter.javahome.baseDirectory.value@",
+                        &effective_java_slash,
+                    )
+                    .replace("@filter.shellscript.javaHome.value@", &effective_java_slash)
+                    .replace("@artifactId@", &artifact_id);
+
+                if lower.contains("jreclasspath") && lower.contains("%batch_home%") {
+                    jar_reference_count += filtered.to_lowercase().matches("%batch_home%").count();
+                }
+
+                let expanded = expand_cmd_percent_vars(&filtered, &sim_vars, true);
+                let exp_len = expanded.chars().count();
+                if exp_len > peak_set_line_len {
+                    peak_set_line_len = exp_len;
+                }
+                if exp_len > WINDOWS_CMD_LINE_LIMIT && set_over_line.is_none() {
+                    set_over_line = Some((idx + 1, exp_len));
+                }
+
+                let exp_trimmed = expanded.trim_start();
+                if exp_trimmed.len() >= 4 && exp_trimmed[..3].eq_ignore_ascii_case("set") {
+                    let after_set = &exp_trimmed[3..];
+                    if after_set.starts_with(' ') || after_set.starts_with('\t') {
+                        let assign = after_set.trim_start();
+                        if let Some(eq_idx) = assign.find('=') {
+                            let var_key = assign[..eq_idx].trim().to_lowercase();
+                            let var_val = assign[eq_idx + 1..].to_string();
+                            if !var_key.is_empty() {
+                                sim_vars.insert(var_key, var_val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut peak_bat_line_len: usize = 0;
+    let mut longest_bat_info: Option<(String, usize)> = None;
+    let batch_dir = base_proj.join("batch");
+    if batch_dir.is_dir() {
+        for entry in walkdir::WalkDir::new(&batch_dir)
+            .max_depth(4)
+            .into_iter()
+            .flatten()
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let fname = entry.file_name().to_string_lossy().to_string();
+            let fname_lower = fname.to_lowercase();
+            if !(fname_lower.ends_with(".bat") || fname_lower.ends_with(".bat.filter")) {
+                continue;
+            }
+            if fname_lower.starts_with("setbatchpath.bat") {
+                continue;
+            }
+            if let Ok(bytes) = fs::read(entry.path()) {
+                let (content, _) = detect_and_decode_text(&bytes);
+                let mut local_vars = sim_vars.clone();
+                for (idx, raw_line) in content.lines().enumerate() {
+                    let trimmed = raw_line.trim();
+                    let lower = trimmed.to_lowercase();
+                    if trimmed.is_empty()
+                        || lower == "rem"
+                        || lower.starts_with("rem ")
+                        || lower.starts_with("rem\t")
+                        || trimmed.starts_with("::")
+                    {
+                        continue;
+                    }
+                    let filtered = raw_line
+                        .replace(
+                            "@filter.shellscript.baseDirectory.value@",
+                            &batch_safe_target_path,
+                        )
+                        .replace(
+                            "@filter.javahome.baseDirectory.value@",
+                            &effective_java_slash,
+                        )
+                        .replace("@filter.shellscript.javaHome.value@", &effective_java_slash)
+                        .replace("@artifactId@", &artifact_id);
+                    let expanded = expand_cmd_percent_vars(&filtered, &local_vars, true);
+                    let exp_len = expanded.chars().count();
+                    if exp_len > peak_bat_line_len {
+                        peak_bat_line_len = exp_len;
+                        longest_bat_info = Some((fname.clone(), idx + 1));
+                    }
+                    let exp_trimmed = expanded.trim_start();
+                    if exp_trimmed.len() >= 4 && exp_trimmed[..3].eq_ignore_ascii_case("set") {
+                        let after_set = &exp_trimmed[3..];
+                        if after_set.starts_with(' ') || after_set.starts_with('\t') {
+                            let assign = after_set.trim_start();
+                            if let Some(eq_idx) = assign.find('=') {
+                                let var_key = assign[..eq_idx].trim().to_lowercase();
+                                let var_val = assign[eq_idx + 1..].to_string();
+                                if !var_key.is_empty() {
+                                    local_vars.insert(var_key, var_val);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let estimated_cmd_line_len = peak_set_line_len.max(peak_bat_line_len);
+    let mut cmd_max_safe_target_len: Option<usize> = None;
+    if jar_reference_count > 0 {
+        let var_term = jar_reference_count.saturating_mul(batch_safe_target_len);
+        if estimated_cmd_line_len >= var_term {
+            let fixed_overhead = estimated_cmd_line_len - var_term;
+            if WINDOWS_CMD_LINE_LIMIT > fixed_overhead {
+                cmd_max_safe_target_len =
+                    Some((WINDOWS_CMD_LINE_LIMIT - fixed_overhead) / jar_reference_count);
+            } else {
+                cmd_max_safe_target_len = Some(0);
+            }
+        }
+    }
+
+    let longest_rel_suffix =
+        estimate_longest_output_suffix(base_proj, ant_props.env_dir.as_deref(), &artifact_id);
+    let estimated_longest_file_path_len = effective_target_len + 1 + longest_rel_suffix;
+    let max_path_safe_target_len =
+        (WINDOWS_MAX_PATH_LIMIT - 1).saturating_sub(1 + longest_rel_suffix);
+
+    let max_safe_target_len = match cmd_max_safe_target_len {
+        Some(cmd_cap) => Some(cmd_cap.min(max_path_safe_target_len)),
+        None => Some(max_path_safe_target_len),
+    };
+
+    let mut offending_script: Option<String> = None;
+    let mut offending_line_number: Option<usize> = None;
+
+    if estimated_cmd_line_len > WINDOWS_CMD_LINE_LIMIT {
+        if let Some((line_no, line_len)) = set_over_line {
+            offending_script = set_batch_name.clone();
+            offending_line_number = Some(line_no);
+            errors.push(format!(
+                "Target path exceeds Windows CMD 8,191-character command line limit: {} expands %BATCH_HOME% across {} JAR entries (Line {} reaches {} chars; peak BAT invocation reaches {} chars > {} limit). Max safe Target Dir length is ~{} chars (current batch-safe length: {} chars).",
+                set_batch_name.as_deref().unwrap_or("SetBatchPath.bat"),
+                jar_reference_count,
+                line_no,
+                line_len,
+                estimated_cmd_line_len,
+                WINDOWS_CMD_LINE_LIMIT,
+                max_safe_target_len.unwrap_or(0),
+                batch_safe_target_len
+            ));
+        } else {
+            if let Some((bname, bline)) = longest_bat_info {
+                offending_script = Some(bname.clone());
+                offending_line_number = Some(bline);
+                errors.push(format!(
+                    "Target path exceeds Windows CMD 8,191-character limit in '{}' line {} ({} chars > {} limit; {} %BATCH_HOME% JAR entries). Max safe Target Dir length is ~{} chars.",
+                    bname,
+                    bline,
+                    estimated_cmd_line_len,
+                    WINDOWS_CMD_LINE_LIMIT,
+                    jar_reference_count,
+                    max_safe_target_len.unwrap_or(0)
+                ));
+            } else {
+                errors.push(format!(
+                    "Target path produces a {} character CMD line (limit: {}). Choose a shorter Target Dir.",
+                    estimated_cmd_line_len, WINDOWS_CMD_LINE_LIMIT
+                ));
+            }
+        }
+    } else if estimated_cmd_line_len >= WINDOWS_CMD_LINE_WARN {
+        warnings.push(format!(
+            "Estimated BAT command line is {} / {} chars ({} %BATCH_HOME% JAR entries). Consider a shorter Target Dir to keep safe headroom.",
+            estimated_cmd_line_len, WINDOWS_CMD_LINE_LIMIT, jar_reference_count
+        ));
+    }
+
+    if estimated_longest_file_path_len >= WINDOWS_MAX_PATH_LIMIT {
+        errors.push(format!(
+            "Longest generated file path under Target Dir would reach {} chars, exceeding Windows MAX_PATH (260 chars). Choose a Target Dir of at most {} chars.",
+            estimated_longest_file_path_len, max_path_safe_target_len
+        ));
+    } else if estimated_longest_file_path_len >= WINDOWS_MAX_PATH_WARN {
+        warnings.push(format!(
+            "Longest generated output path approaches Windows MAX_PATH ({} / 260 chars).",
+            estimated_longest_file_path_len
+        ));
+    }
+
+    let is_valid = errors.is_empty();
+    let severity = if !is_valid {
+        "error".to_string()
+    } else if !warnings.is_empty() {
+        "warning".to_string()
+    } else {
+        "ok".to_string()
+    };
+
+    let summary = if !errors.is_empty() {
+        errors.join("\n")
+    } else if !warnings.is_empty() {
+        warnings.join("\n")
+    } else if estimated_cmd_line_len > 0 {
+        format!(
+            "Target path is safe (est. CMD line: {} / {} chars; max output path: {} / 260 chars).",
+            estimated_cmd_line_len, WINDOWS_CMD_LINE_LIMIT, estimated_longest_file_path_len
+        )
+    } else {
+        format!(
+            "Target path is safe (max output path: {} / 260 chars).",
+            estimated_longest_file_path_len
+        )
+    };
+
+    TargetPathValidation {
+        is_valid,
+        is_default_target,
+        default_target_path,
+        effective_target_path,
+        batch_safe_target_path,
+        effective_target_len,
+        batch_safe_target_len,
+        cmd_limit: WINDOWS_CMD_LINE_LIMIT,
+        max_path_limit: WINDOWS_MAX_PATH_LIMIT,
+        estimated_cmd_line_len,
+        estimated_longest_file_path_len,
+        max_safe_target_len,
+        offending_script,
+        offending_line_number,
+        jar_reference_count,
+        severity,
+        errors,
+        warnings,
+        summary,
+    }
+}
+
+/// Check and fix project paths, optional custom target build path, and (optionally) Java Home keys
+/// in the target's `.properties` file. Preserves default behavior when `custom_target_path` is `None`.
+fn update_properties_file_paths(
     prop_file: &Path,
     project_path: &str,
     active_java_home: Option<&str>,
+    custom_target_path: Option<&str>,
+    update_java: bool,
 ) -> bool {
     let bytes = match fs::read(prop_file) {
         Ok(b) => b,
@@ -660,20 +1580,41 @@ pub fn fix_properties_file_paths(
         .to_string();
     let proj_slash = escape_properties_value(&safe_proj_raw);
 
-    let java_slash = active_java_home
-        .and_then(|jh| validate_java_home_dir(jh).ok())
-        .map(|valid_jh| {
-            let safe_jh = to_batch_safe_path(&valid_jh.to_string_lossy())
+    let effective_target_slash = match custom_target_path
+        .map(|s| s.trim().trim_matches('"'))
+        .filter(|s| !s.is_empty())
+    {
+        Some(custom_raw) => {
+            let safe_t = to_batch_safe_path(custom_raw)
                 .trim()
                 .trim_matches('"')
                 .replace('\\', "/")
                 .trim_end_matches('/')
                 .to_string();
-            escape_properties_value(&safe_jh)
-        });
+            escape_properties_value(&safe_t)
+        }
+        None => format!("{}/target", proj_slash),
+    };
 
-    // Detect old project root prefix from baseDirectory or pom.log4j.path.value
+    let java_slash = if update_java {
+        active_java_home
+            .and_then(|jh| validate_java_home_dir(jh).ok())
+            .map(|valid_jh| {
+                let safe_jh = to_batch_safe_path(&valid_jh.to_string_lossy())
+                    .trim()
+                    .trim_matches('"')
+                    .replace('\\', "/")
+                    .trim_end_matches('/')
+                    .to_string();
+                escape_properties_value(&safe_jh)
+            })
+    } else {
+        None
+    };
+
+    // Detect old target root and old project root prefix from baseDirectory or pom.log4j.path.value
     let mut old_proj_prefix: Option<String> = None;
+    let mut old_target_root: Option<String> = None;
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('#') || trimmed.starts_with('!') {
@@ -685,16 +1626,26 @@ pub fn fix_properties_file_paths(
             let val = val_raw_un.replace('\\', "/");
             if key == "filter.shellscript.baseDirectory.value" {
                 let clean_val = val.trim_end_matches('/');
+                if !clean_val.is_empty() {
+                    old_target_root = Some(clean_val.to_string());
+                }
                 if clean_val.to_lowercase().ends_with("/target") {
                     let prefix_len = clean_val.len() - "/target".len();
                     old_proj_prefix = Some(clean_val[..prefix_len].to_string());
-                    break;
                 }
-            } else if key == "pom.log4j.path.value" && old_proj_prefix.is_none() {
+                break;
+            } else if key == "pom.log4j.path.value" {
+                let clean_val = val.trim_end_matches('/');
+                if old_target_root.is_none() && clean_val.to_lowercase().ends_with("/log") {
+                    let root_len = clean_val.len() - "/log".len();
+                    old_target_root = Some(clean_val[..root_len].to_string());
+                }
                 let val_lower = val.to_lowercase();
-                if let Some(t_idx) = val_lower.find("/target/") {
-                    if val.is_char_boundary(t_idx) {
-                        old_proj_prefix = Some(val[..t_idx].to_string());
+                if old_proj_prefix.is_none() {
+                    if let Some(t_idx) = val_lower.find("/target/") {
+                        if val.is_char_boundary(t_idx) {
+                            old_proj_prefix = Some(val[..t_idx].to_string());
+                        }
                     }
                 }
             }
@@ -719,68 +1670,94 @@ pub fn fix_properties_file_paths(
 
             let mut new_val: Option<String> = None;
 
-            if is_java_home_property_key(key) {
+            if update_java && is_java_home_property_key(key) {
                 if let Some(ref js) = java_slash {
                     if val != js {
                         new_val = Some(js.clone());
                     }
                 }
             } else if key == "filter.shellscript.baseDirectory.value" {
-                let desired = format!("{}/target", proj_slash);
-                if val != desired {
-                    new_val = Some(desired);
+                if val != effective_target_slash {
+                    new_val = Some(effective_target_slash.clone());
                 }
             } else if key == "pom.log4j.path.value" {
-                let desired = format!("{}/target/log/", proj_slash);
+                let desired = format!("{}/log/", effective_target_slash);
                 if val != desired {
                     new_val = Some(desired);
                 }
             } else if key == "filter.resources.propertiesLocation" {
-                let desired = format!("{}/target/batch/properties", proj_slash);
+                let desired = format!("{}/batch/properties", effective_target_slash);
                 if val != desired {
                     new_val = Some(desired);
                 }
             } else if key == "filter.common.errmailBatchPath.value"
                 || key == "filter.common.errmailWebPath.value"
             {
-                let desired = format!("{}/target/batch/properties/mdware_xml", proj_slash);
+                let desired = format!("{}/batch/properties/mdware_xml", effective_target_slash);
                 if val != desired {
                     new_val = Some(desired);
                 }
-            } else {
+            } else if !is_java_home_property_key(key) {
                 let val_decoded = unescape_properties_value(val);
                 let val_norm = val_decoded.replace('\\', "/");
                 let val_lower = val_norm.to_lowercase();
-                if let Some(t_idx) = val_lower.find("/target/") {
-                    if val_norm.is_char_boundary(t_idx) {
-                        let suffix = escape_properties_value(&val_norm[t_idx..]);
-                        let desired = format!("{}{}", proj_slash, suffix);
-                        if val != desired {
-                            new_val = Some(desired);
-                        }
-                    }
-                } else if let Some(ref old_p) = old_proj_prefix {
-                    if !old_p.is_empty() {
-                        let old_lower = old_p.to_lowercase();
-                        if val_lower.starts_with(&old_lower)
-                            && val_norm.is_char_boundary(old_p.len())
-                        {
-                            let suffix = escape_properties_value(&val_norm[old_p.len()..]);
-                            let desired = format!("{}{}", proj_slash, suffix);
+
+                if let Some(ref old_t) = old_target_root {
+                    let old_t_lower = old_t.to_lowercase();
+                    if !old_t.is_empty()
+                        && val_lower.starts_with(&old_t_lower)
+                        && val_norm.is_char_boundary(old_t.len())
+                    {
+                        let rest = &val_norm[old_t.len()..];
+                        if rest.is_empty() || rest.starts_with('/') {
+                            let desired = format!(
+                                "{}{}",
+                                effective_target_slash,
+                                escape_properties_value(rest)
+                            );
                             if val != desired {
                                 new_val = Some(desired);
                             }
-                        } else if !val.is_ascii() {
-                            let escaped = escape_properties_value(val);
-                            if val != escaped {
-                                new_val = Some(escaped);
-                            }
                         }
                     }
-                } else if !val.is_ascii() {
-                    let escaped = escape_properties_value(val);
-                    if val != escaped {
-                        new_val = Some(escaped);
+                }
+
+                if new_val.is_none() {
+                    if let Some(t_idx) = val_lower.find("/target/") {
+                        if val_norm.is_char_boundary(t_idx) {
+                            let after_target = &val_norm[t_idx + "/target".len()..];
+                            let suffix = escape_properties_value(after_target);
+                            let desired = format!("{}{}", effective_target_slash, suffix);
+                            if val != desired {
+                                new_val = Some(desired);
+                            }
+                        }
+                    } else if let Some(ref old_p) = old_proj_prefix {
+                        if !old_p.is_empty() {
+                            let old_lower = old_p.to_lowercase();
+                            if val_lower.starts_with(&old_lower)
+                                && val_norm.is_char_boundary(old_p.len())
+                            {
+                                let rest = &val_norm[old_p.len()..];
+                                if rest.is_empty() || rest.starts_with('/') {
+                                    let suffix = escape_properties_value(rest);
+                                    let desired = format!("{}{}", proj_slash, suffix);
+                                    if val != desired {
+                                        new_val = Some(desired);
+                                    }
+                                }
+                            } else if update_java && !val.is_ascii() {
+                                let escaped = escape_properties_value(val);
+                                if val != escaped {
+                                    new_val = Some(escaped);
+                                }
+                            }
+                        }
+                    } else if update_java && !val.is_ascii() {
+                        let escaped = escape_properties_value(val);
+                        if val != escaped {
+                            new_val = Some(escaped);
+                        }
                     }
                 }
             }
@@ -815,11 +1792,97 @@ pub fn fix_properties_file_paths(
     changed
 }
 
+/// Check and fix project paths & all Java Home keys in the target's .properties file.
+/// Uses Windows 8.3 short paths for space/non-ASCII segments and `\uXXXX` escaping so Java's
+/// `Properties.load(InputStream)` & Ant `<filterset>` never corrupt Japanese characters into `????`.
+pub fn fix_properties_file_paths(
+    prop_file: &Path,
+    project_path: &str,
+    active_java_home: Option<&str>,
+) -> bool {
+    update_properties_file_paths(prop_file, project_path, active_java_home, None, true)
+}
+
+/// Dynamically synchronize target-dependent path keys in a target `.properties` file
+/// without modifying Java Home or unrelated properties.
+pub fn sync_properties_target_path(
+    prop_file: &Path,
+    project_path: &str,
+    custom_target_path: Option<&str>,
+) -> bool {
+    update_properties_file_paths(prop_file, project_path, None, custom_target_path, false)
+}
+
+/// Configure and persist custom target build path for a project, validate it, and sync `.properties`
+/// when a non-default path is valid or when restoring default after a previous custom override.
+pub fn configure_project_target_path(
+    project_path: &str,
+    target: Option<&str>,
+    custom_target_path: Option<&str>,
+    java_home: Option<&str>,
+) -> Result<SetTargetPathResult, String> {
+    let prev_custom = crate::modules::settings::get_project_target_path(project_path);
+    let (effective_pb, default_pb, is_default) =
+        resolve_effective_target_dir(project_path, target, custom_target_path);
+    let default_target_path = format_display_windows_path(&default_pb);
+    let effective_target_path = format_display_windows_path(&effective_pb);
+
+    let persisted = crate::modules::settings::set_project_target_path(
+        project_path,
+        if is_default {
+            None
+        } else {
+            Some(&effective_target_path)
+        },
+    )?;
+
+    let validation = validate_target_build_path(
+        project_path,
+        target.unwrap_or(""),
+        persisted.as_deref(),
+        java_home,
+    );
+
+    let prop_path = find_build_dir(project_path).and_then(|bd| {
+        target
+            .filter(|t| !t.trim().is_empty())
+            .and_then(|t| find_properties_for_target(&bd, t))
+    });
+
+    let mut properties_updated = false;
+    if validation.is_valid && (!is_default || prev_custom.is_some()) {
+        if let Some(ref pp) = prop_path {
+            properties_updated =
+                sync_properties_target_path(pp, project_path, persisted.as_deref());
+        }
+    }
+
+    Ok(SetTargetPathResult {
+        custom_target_path: persisted,
+        effective_target_path,
+        default_target_path,
+        is_default_target: is_default,
+        properties_updated,
+        properties_file: prop_path.map(|p| p.to_string_lossy().to_string()),
+        validation,
+    })
+}
+
 /// Apply explicit Auto Config to build.xml javac path and target .properties paths
 pub fn run_auto_config(
     project_path: &str,
     target: &str,
     java_home: Option<&str>,
+) -> Result<AutoConfigResult, String> {
+    run_auto_config_with_target(project_path, target, java_home, None)
+}
+
+/// Apply explicit Auto Config while preserving any configured custom target build path.
+pub fn run_auto_config_with_target(
+    project_path: &str,
+    target: &str,
+    java_home: Option<&str>,
+    custom_target_path: Option<&str>,
 ) -> Result<AutoConfigResult, String> {
     let build_dir = find_build_dir(project_path).ok_or_else(|| {
         format!(
@@ -828,12 +1891,31 @@ pub fn run_auto_config(
         )
     })?;
 
+    let (effective_pb, _, is_default_target) =
+        resolve_effective_target_dir(project_path, Some(target), custom_target_path);
+    let effective_target_str = format_display_windows_path(&effective_pb);
+
     let safe_proj = to_batch_safe_path(project_path)
         .trim()
         .trim_matches('"')
         .replace('\\', "/")
         .trim_end_matches('/')
         .to_string();
+    let custom_arg = if is_default_target {
+        None
+    } else {
+        Some(effective_target_str.as_str())
+    };
+    let effective_target_slash = if is_default_target {
+        format!("{}/target", safe_proj)
+    } else {
+        to_batch_safe_path(&effective_target_str)
+            .trim()
+            .trim_matches('"')
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string()
+    };
 
     let active_java_home = resolve_active_java_home(java_home);
     let mut changes = Vec::new();
@@ -853,7 +1935,13 @@ pub fn run_auto_config(
     let prop_str = prop_path.as_ref().map(|p| p.to_string_lossy().to_string());
 
     if let Some(ref pp) = prop_path {
-        if fix_properties_file_paths(pp, project_path, active_java_home.as_deref()) {
+        if update_properties_file_paths(
+            pp,
+            project_path,
+            active_java_home.as_deref(),
+            custom_arg,
+            true,
+        ) {
             properties_updated = true;
             let prop_name = pp
                 .file_name()
@@ -862,11 +1950,14 @@ pub fn run_auto_config(
             if let Some(ref jh) = active_java_home {
                 let safe_jh = to_batch_safe_path(jh).replace('\\', "/");
                 changes.push(format!(
-                    "{} paths -> {}, JavaHome -> {}",
-                    prop_name, safe_proj, safe_jh
+                    "{} target -> {}, JavaHome -> {}",
+                    prop_name, effective_target_slash, safe_jh
                 ));
             } else {
-                changes.push(format!("{} paths -> {}", prop_name, safe_proj));
+                changes.push(format!(
+                    "{} target -> {}",
+                    prop_name, effective_target_slash
+                ));
             }
         }
     }
@@ -927,18 +2018,33 @@ pub fn resolve_target_log_dirs(
     properties_file: Option<&Path>,
     base_dir_str: Option<&str>,
 ) -> Vec<PathBuf> {
+    resolve_target_log_dirs_with_target(project_path, properties_file, base_dir_str, None)
+}
+
+/// Target-aware log directory resolution supporting custom Target Build Paths.
+pub fn resolve_target_log_dirs_with_target(
+    project_path: &str,
+    properties_file: Option<&Path>,
+    base_dir_str: Option<&str>,
+    custom_target_path: Option<&str>,
+) -> Vec<PathBuf> {
     let clean_proj = project_path.trim().trim_matches('"').replace('/', "\\");
     let base_proj = Path::new(&clean_proj);
     let source_batch_dir = base_proj.join("batch");
+    let (effective_target, _, is_default_target) =
+        resolve_effective_target_dir(&clean_proj, None, custom_target_path);
 
     let mut raw_dirs: Vec<PathBuf> = Vec::new();
+    raw_dirs.push(effective_target.join("log"));
 
     if let Some(prop_path) = properties_file {
         if let Some(log4j_dir) = extract_property_value(prop_path, "pom.log4j.path.value") {
             let clean_slash = log4j_dir.trim().replace('\\', "/");
             if !clean_slash.is_empty() {
                 let candidate = PathBuf::from(clean_slash.replace('/', "\\"));
-                if is_path_within_dir(&candidate, base_proj) {
+                let allowed = is_path_within_dir(&candidate, &effective_target)
+                    || (is_default_target && is_path_within_dir(&candidate, base_proj));
+                if allowed {
                     raw_dirs.push(candidate);
                 }
 
@@ -953,7 +2059,10 @@ pub fn resolve_target_log_dirs(
                             let replaced =
                                 clean_slash.replace(&std_desk, od_str.trim_end_matches('/'));
                             let od_candidate = PathBuf::from(replaced.replace('/', "\\"));
-                            if is_path_within_dir(&od_candidate, base_proj) {
+                            let od_allowed = is_path_within_dir(&od_candidate, &effective_target)
+                                || (is_default_target
+                                    && is_path_within_dir(&od_candidate, base_proj));
+                            if od_allowed {
                                 raw_dirs.push(od_candidate);
                             }
                         }
@@ -968,7 +2077,9 @@ pub fn resolve_target_log_dirs(
         let clean_trimmed = clean_win.trim_end_matches('\\');
         if !clean_trimmed.is_empty() {
             let direct = PathBuf::from(clean_trimmed);
-            if is_path_within_dir(&direct, base_proj)
+            let within = is_path_within_dir(&direct, &effective_target)
+                || (is_default_target && is_path_within_dir(&direct, base_proj));
+            if within
                 && !paths_equal_ci(&direct, base_proj)
                 && !paths_equal_ci(&direct, &source_batch_dir)
             {
@@ -977,7 +2088,9 @@ pub fn resolve_target_log_dirs(
         }
     }
 
-    raw_dirs.push(base_proj.join("target").join("log"));
+    if is_default_target {
+        raw_dirs.push(base_proj.join("target").join("log"));
+    }
 
     let mut unique_dirs: Vec<PathBuf> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -1003,7 +2116,23 @@ pub fn resolve_log_file(
     base_dir_str: Option<&str>,
     file_name: &str,
 ) -> (Option<String>, Option<String>) {
-    let candidate_dirs = resolve_target_log_dirs(project_path, properties_file, base_dir_str);
+    resolve_log_file_with_target(project_path, properties_file, base_dir_str, file_name, None)
+}
+
+/// Target-aware log file resolver supporting custom Target Build Paths.
+pub fn resolve_log_file_with_target(
+    project_path: &str,
+    properties_file: Option<&Path>,
+    base_dir_str: Option<&str>,
+    file_name: &str,
+    custom_target_path: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let candidate_dirs = resolve_target_log_dirs_with_target(
+        project_path,
+        properties_file,
+        base_dir_str,
+        custom_target_path,
+    );
 
     let mut found_log_file: Option<String> = None;
     let mut found_log_dir: Option<String> = None;
@@ -1090,12 +2219,23 @@ pub fn discover_configured_log_files(
     project_path: &str,
     base_dir_str: Option<&str>,
 ) -> (Option<String>, Option<String>) {
+    discover_configured_log_files_with_target(project_path, base_dir_str, None)
+}
+
+/// Target-aware log filename discovery from project log4j configurations.
+pub fn discover_configured_log_files_with_target(
+    project_path: &str,
+    base_dir_str: Option<&str>,
+    custom_target_path: Option<&str>,
+) -> (Option<String>, Option<String>) {
     let clean_proj = project_path.trim().trim_matches('"').replace('/', "\\");
     if clean_proj.is_empty() {
         return (None, None);
     }
     let base_proj = Path::new(&clean_proj);
     let source_batch_dir = base_proj.join("batch");
+    let (effective_target, _, is_default_target) =
+        resolve_effective_target_dir(&clean_proj, None, custom_target_path);
 
     let mut candidates: Vec<PathBuf> = Vec::new();
 
@@ -1104,7 +2244,9 @@ pub fn discover_configured_log_files(
         let clean_trimmed = clean_base.trim_end_matches('\\');
         if !clean_trimmed.is_empty() {
             let bdir = PathBuf::from(clean_trimmed);
-            if is_path_within_dir(&bdir, base_proj)
+            let within = is_path_within_dir(&bdir, &effective_target)
+                || (is_default_target && is_path_within_dir(&bdir, base_proj));
+            if within
                 && !paths_equal_ci(&bdir, base_proj)
                 && !paths_equal_ci(&bdir, &source_batch_dir)
             {
@@ -1120,8 +2262,7 @@ pub fn discover_configured_log_files(
     }
 
     candidates.push(
-        base_proj
-            .join("target")
+        effective_target
             .join("batch")
             .join("properties")
             .join("stcliblog4j.properties"),
@@ -1139,7 +2280,7 @@ pub fn discover_configured_log_files(
             .join("stcliblog4j.properties"),
     );
 
-    for root_dir in [base_proj.join("target"), base_proj.join("batch")] {
+    for root_dir in [effective_target, base_proj.join("batch")] {
         if root_dir.is_dir() {
             for entry in walkdir::WalkDir::new(&root_dir)
                 .max_depth(4)
@@ -1433,6 +2574,17 @@ pub fn open_target_log_file(
     log_folder_path: Option<&str>,
     file_name: &str,
 ) -> Result<String, String> {
+    open_target_log_file_with_target(project_path, target, log_folder_path, file_name, None)
+}
+
+/// Target-aware log file opener supporting custom Target Build Paths.
+pub fn open_target_log_file_with_target(
+    project_path: Option<&str>,
+    target: Option<&str>,
+    log_folder_path: Option<&str>,
+    file_name: &str,
+    custom_target_path: Option<&str>,
+) -> Result<String, String> {
     let clean_name = file_name.trim();
     if clean_name.is_empty() {
         return Err("Log file name cannot be empty.".to_string());
@@ -1449,10 +2601,11 @@ pub fn open_target_log_file(
             .as_ref()
             .and_then(|bd| target.and_then(|t| find_properties_for_target(bd, t)));
         let base_dir = prop_file.as_ref().and_then(|p| extract_base_directory(p));
-        candidate_dirs.extend(resolve_target_log_dirs(
+        candidate_dirs.extend(resolve_target_log_dirs_with_target(
             proj_str,
             prop_file.as_deref(),
             base_dir.as_deref(),
+            custom_target_path,
         ));
     }
 
@@ -1500,9 +2653,10 @@ pub fn open_target_log_file(
         .find(|d| d.is_dir())
         .cloned()
         .or_else(|| {
-            proj_opt
-                .as_ref()
-                .map(|p| Path::new(p).join("target").join("log"))
+            proj_opt.as_ref().map(|p| {
+                let (eff, _, _) = resolve_effective_target_dir(p, target, custom_target_path);
+                eff.join("log")
+            })
         })
         .unwrap_or_else(|| deduped[0].clone());
 
@@ -1523,6 +2677,25 @@ pub fn clear_target_log_files(
     batch_log_name: Option<&str>,
     app_log_name: Option<&str>,
 ) -> Result<ClearLogsResult, String> {
+    clear_target_log_files_with_target(
+        project_path,
+        target,
+        log_folder_path,
+        batch_log_name,
+        app_log_name,
+        None,
+    )
+}
+
+/// Target-aware `.log` truncation helper supporting custom Target Build Paths.
+pub fn clear_target_log_files_with_target(
+    project_path: Option<&str>,
+    target: Option<&str>,
+    log_folder_path: Option<&str>,
+    batch_log_name: Option<&str>,
+    app_log_name: Option<&str>,
+    custom_target_path: Option<&str>,
+) -> Result<ClearLogsResult, String> {
     let mut candidate_dirs: Vec<PathBuf> = Vec::new();
     let proj_opt = project_path
         .map(|s| s.trim().trim_matches('"').replace('/', "\\"))
@@ -1534,10 +2707,11 @@ pub fn clear_target_log_files(
             .as_ref()
             .and_then(|bd| target.and_then(|t| find_properties_for_target(bd, t)));
         let base_dir = prop_file.as_ref().and_then(|p| extract_base_directory(p));
-        candidate_dirs.extend(resolve_target_log_dirs(
+        candidate_dirs.extend(resolve_target_log_dirs_with_target(
             proj_str,
             prop_file.as_deref(),
             base_dir.as_deref(),
+            custom_target_path,
         ));
     }
 
@@ -1549,11 +2723,16 @@ pub fn clear_target_log_files(
                 .as_deref()
                 .map(|p| is_excluded_source_log_dir(&dir_path, Path::new(p)))
                 .unwrap_or(false);
-            let within_proj = proj_opt
+            let within_allowed = proj_opt
                 .as_deref()
-                .map(|p| is_path_within_dir(&dir_path, Path::new(p)))
+                .map(|p| {
+                    let (eff, _, is_def) =
+                        resolve_effective_target_dir(p, target, custom_target_path);
+                    is_path_within_dir(&dir_path, &eff)
+                        || (is_def && is_path_within_dir(&dir_path, Path::new(p)))
+                })
                 .unwrap_or(false);
-            if !excluded && within_proj {
+            if !excluded && within_allowed {
                 candidate_dirs.push(dir_path);
             }
         }
@@ -1612,13 +2791,21 @@ pub fn clear_target_log_files(
         }
     }
 
-    candidate_files.sort_by(|a, b| a.to_string_lossy().to_lowercase().cmp(&b.to_string_lossy().to_lowercase()));
+    candidate_files.sort_by(|a, b| {
+        a.to_string_lossy()
+            .to_lowercase()
+            .cmp(&b.to_string_lossy().to_lowercase())
+    });
 
     let mut cleared_files = Vec::new();
     let mut failed_files = Vec::new();
     for file_path in candidate_files {
         let display = file_path.to_string_lossy().replace('/', "\\");
-        match fs::OpenOptions::new().write(true).truncate(true).open(&file_path) {
+        match fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&file_path)
+        {
             Ok(_) => cleared_files.push(display),
             Err(err) => failed_files.push(format!("{}: {}", display, err)),
         }
@@ -1683,25 +2870,39 @@ pub fn scan_bat_files(
     project_path: &str,
     base_dir_str: Option<&str>,
 ) -> (Option<PathBuf>, Vec<BatFileInfo>) {
+    scan_bat_files_with_target(project_path, base_dir_str, None)
+}
+
+/// Target-aware `.bat` folder scanner supporting custom Target Build Paths.
+/// When a custom target path is set, never falls back to stale `<project>/target` or source `batch/batfiles`.
+pub fn scan_bat_files_with_target(
+    project_path: &str,
+    base_dir_str: Option<&str>,
+    custom_target_path: Option<&str>,
+) -> (Option<PathBuf>, Vec<BatFileInfo>) {
     let clean_proj_str = project_path.trim().trim_matches('"').replace('/', "\\");
     let base_proj = Path::new(&clean_proj_str);
     let source_batch_dir = base_proj.join("batch");
     let source_batfiles_dir = source_batch_dir.join("batfiles");
-    let proj_has_tilde = clean_proj_str.contains('~');
+    let (effective_target, _, is_default_target) =
+        resolve_effective_target_dir(&clean_proj_str, None, custom_target_path);
+    let target_has_tilde = effective_target.to_string_lossy().contains('~');
 
-    // Always prefer the selected project's own target folders first
+    // Always prefer the active effective target folders first
     let mut candidate_folders: Vec<PathBuf> = vec![
-        base_proj.join("target").join("batch").join("batfiles"),
-        base_proj.join("target").join("batfiles"),
+        effective_target.join("batch").join("batfiles"),
+        effective_target.join("batfiles"),
     ];
 
-    // Only accept properties base_dir candidates that reside strictly inside the selected project
+    // Only accept properties base_dir candidates that reside strictly inside the effective target (or project when default)
     if let Some(base_str) = base_dir_str {
         let base_norm = base_str.trim().replace('/', "\\");
         let clean_base = base_norm.trim_end_matches('\\');
         if !clean_base.is_empty() {
             let direct_path = PathBuf::from(clean_base);
-            if is_path_within_dir(&direct_path, base_proj)
+            let within = is_path_within_dir(&direct_path, &effective_target)
+                || (is_default_target && is_path_within_dir(&direct_path, base_proj));
+            if within
                 && !paths_equal_ci(&direct_path, base_proj)
                 && !paths_equal_ci(&direct_path, &source_batch_dir)
             {
@@ -1724,7 +2925,9 @@ pub fn scan_bat_files(
                             let od_str = od_desk.to_string_lossy().replace('/', "\\");
                             let replaced = format!("{}{}", od_str.trim_end_matches('\\'), suffix);
                             let p = PathBuf::from(replaced);
-                            if is_path_within_dir(&p, base_proj)
+                            let p_within = is_path_within_dir(&p, &effective_target)
+                                || (is_default_target && is_path_within_dir(&p, base_proj));
+                            if p_within
                                 && !paths_equal_ci(&p, base_proj)
                                 && !paths_equal_ci(&p, &source_batch_dir)
                             {
@@ -1745,7 +2948,7 @@ pub fn scan_bat_files(
             continue;
         }
         if folder.is_dir() {
-            let display_dir = if !proj_has_tilde && folder.to_string_lossy().contains('~') {
+            let display_dir = if !target_has_tilde && folder.to_string_lossy().contains('~') {
                 to_display_long_path(&folder)
             } else {
                 folder
@@ -1757,10 +2960,9 @@ pub fn scan_bat_files(
         }
     }
 
-    // Check nested directories inside target (e.g., target/20-honban-psp/hansoku/batch/batfiles)
-    let target_root = base_proj.join("target");
-    if target_root.is_dir() {
-        for entry in walkdir::WalkDir::new(&target_root)
+    // Check nested directories inside effective target (e.g., <effective_target>/20-honban-psp/hansoku/batch/batfiles)
+    if effective_target.is_dir() {
+        for entry in walkdir::WalkDir::new(&effective_target)
             .max_depth(5)
             .into_iter()
             .flatten()
@@ -1773,12 +2975,12 @@ pub fn scan_bat_files(
                     .unwrap_or(false);
                 if is_batfiles {
                     let dir_path = entry.path().to_path_buf();
-                    let display_dir = if !proj_has_tilde && dir_path.to_string_lossy().contains('~')
-                    {
-                        to_display_long_path(&dir_path)
-                    } else {
-                        dir_path
-                    };
+                    let display_dir =
+                        if !target_has_tilde && dir_path.to_string_lossy().contains('~') {
+                            to_display_long_path(&dir_path)
+                        } else {
+                            dir_path
+                        };
                     let files = list_bat_files_in_dir(&display_dir);
                     if !files.is_empty() {
                         return (Some(display_dir), files);
@@ -1890,48 +3092,78 @@ impl std::fmt::Display for ChronoLite {
 
 /// Inspect target post-build or directly
 pub fn inspect_target_files(project_path: &str, target: &str) -> PostBuildInspection {
+    inspect_target_files_with_target(project_path, target, None)
+}
+
+/// Target-aware post-build inspection supporting custom Target Build Paths.
+pub fn inspect_target_files_with_target(
+    project_path: &str,
+    target: &str,
+    custom_target_path: Option<&str>,
+) -> PostBuildInspection {
+    let (effective_pb, default_pb, is_default_target) =
+        resolve_effective_target_dir(project_path, Some(target), custom_target_path);
+    let default_target_path = format_display_windows_path(&default_pb);
+    let effective_target_path = format_display_windows_path(&effective_pb);
+    let eff_arg = if is_default_target {
+        None
+    } else {
+        Some(effective_target_path.as_str())
+    };
+
     let build_dir = find_build_dir(project_path);
     let prop_file = build_dir
         .as_ref()
         .and_then(|bd| find_properties_for_target(bd, target));
 
     let base_dir = prop_file.as_ref().and_then(|p| extract_base_directory(p));
-    let (bat_folder, bat_files) = scan_bat_files(project_path, base_dir.as_deref());
+    let (bat_folder, bat_files) =
+        scan_bat_files_with_target(project_path, base_dir.as_deref(), eff_arg);
     let (batch_log_name, app_log_name) =
-        discover_configured_log_files(project_path, base_dir.as_deref());
+        discover_configured_log_files_with_target(project_path, base_dir.as_deref(), eff_arg);
 
     let (log_file_path, batch_log_folder) = if let Some(ref b_name) = batch_log_name {
-        resolve_log_file(
+        resolve_log_file_with_target(
             project_path,
             prop_file.as_deref(),
             base_dir.as_deref(),
             b_name,
+            eff_arg,
         )
     } else {
         (None, None)
     };
 
     let (app_log_file_path, app_log_folder) = if let Some(ref a_name) = app_log_name {
-        resolve_log_file(
+        resolve_log_file_with_target(
             project_path,
             prop_file.as_deref(),
             base_dir.as_deref(),
             a_name,
+            eff_arg,
         )
     } else {
         (None, None)
     };
 
     let log_folder_path = batch_log_folder.or(app_log_folder).or_else(|| {
-        resolve_target_log_dirs(project_path, prop_file.as_deref(), base_dir.as_deref())
-            .into_iter()
-            .find(|d| d.is_dir())
-            .map(|d| d.to_string_lossy().replace('/', "\\"))
+        resolve_target_log_dirs_with_target(
+            project_path,
+            prop_file.as_deref(),
+            base_dir.as_deref(),
+            eff_arg,
+        )
+        .into_iter()
+        .find(|d| d.is_dir())
+        .map(|d| d.to_string_lossy().replace('/', "\\"))
     });
 
     PostBuildInspection {
         properties_file: prop_file.map(|p| p.to_string_lossy().to_string()),
         base_directory: base_dir,
+        default_target_path: Some(default_target_path),
+        effective_target_path: Some(effective_target_path),
+        is_default_target,
         bat_folder: bat_folder.map(|p| p.to_string_lossy().to_string()),
         bat_files,
         batch_log_name,
@@ -1942,14 +3174,16 @@ pub fn inspect_target_files(project_path: &str, target: &str) -> PostBuildInspec
     }
 }
 
-/// Run CMD ant <target> and stream ALL logs in real-time (including Shift-JIS / CP932 lines)
+/// Run pre-build target path validation, sync dynamic dependencies if a custom target path is set,
+/// execute CMD `ant <target>`, and stream ALL logs in real-time (including Shift-JIS / CP932 lines).
 pub fn run_ant_build(
     app: AppHandle,
     tab_id: String,
     project_path: String,
     target: String,
     ant_executable: Option<String>,
-    _java_home: Option<String>,
+    java_home: Option<String>,
+    custom_target_path: Option<String>,
 ) -> Result<BuildResult, String> {
     let build_dir = find_build_dir(&project_path).ok_or_else(|| {
         format!(
@@ -1968,6 +3202,29 @@ pub fn run_ant_build(
         );
     };
 
+    let validation = validate_target_build_path(
+        &project_path,
+        &target,
+        custom_target_path.as_deref(),
+        java_home.as_deref(),
+    );
+    if !validation.is_valid {
+        emit_line(
+            &app,
+            &tab_id,
+            format!(
+                "[PRE-BUILD BLOCKED] Target path validation failed for '{}':\n{}",
+                validation.effective_target_path, validation.summary
+            ),
+        );
+        return Err(format!(
+            "Pre-build path validation failed:\n{}",
+            validation.summary
+        ));
+    }
+
+    let ant_props = detect_ant_target_properties(&project_path, Some(&target));
+
     // Resolve clean Ant command (prefer "ant" if available in PATH, just like manual CMD)
     let ant_exe = if let Some(exe) = ant_executable.filter(|s| !s.trim().is_empty()) {
         let clean = exe.trim().trim_matches('"').to_string();
@@ -1980,13 +3237,86 @@ pub fn run_ant_build(
         "ant".to_string()
     };
 
-    emit_line(&app, &tab_id, format!("> {} {}", ant_exe, target));
-
     #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     let mut command = Command::new("cmd.exe");
-    command.args(["/c", &ant_exe, &target]);
+    command.arg("/c");
+    command.arg(&ant_exe);
+
+    if !validation.is_default_target {
+        let eff_arg = validation.effective_target_path.as_str();
+        if let Some(prop_path) = find_properties_for_target(&build_dir, &target) {
+            if sync_properties_target_path(&prop_path, &project_path, Some(eff_arg)) {
+                emit_line(
+                    &app,
+                    &tab_id,
+                    format!(
+                        "> Synced target path in {} -> {}",
+                        prop_path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "properties".to_string()),
+                        validation.batch_safe_target_path
+                    ),
+                );
+            }
+        }
+
+        let target_slash = validation.batch_safe_target_path.as_str();
+        let target_prop_arg = format!("-D{}={}", ant_props.target_prop_name, target_slash);
+        let classes_prop_arg = if !ant_props
+            .build_classes_prop_name
+            .eq_ignore_ascii_case(&ant_props.target_prop_name)
+        {
+            Some(format!(
+                "-D{}={}/classes",
+                ant_props.build_classes_prop_name, target_slash
+            ))
+        } else {
+            None
+        };
+
+        command.env("TARGET_HOME", target_slash);
+
+        #[cfg(windows)]
+        {
+            // Quote -Dname=val via raw_arg so ant.bat does not split on '=' under cmd.exe
+            command.raw_arg(format!("\"{}\"", target_prop_arg));
+            if let Some(ref c_arg) = classes_prop_arg {
+                command.raw_arg(format!("\"{}\"", c_arg));
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            command.arg(&target_prop_arg);
+            if let Some(ref c_arg) = classes_prop_arg {
+                command.arg(c_arg);
+            }
+        }
+        command.arg(&target);
+
+        let extra_display = classes_prop_arg
+            .as_deref()
+            .map(|c| format!(" \"{}\"", c))
+            .unwrap_or_default();
+        emit_line(
+            &app,
+            &tab_id,
+            format!(
+                "> {} \"{}\" {} {}",
+                ant_exe,
+                target_prop_arg,
+                extra_display.trim_start(),
+                target
+            )
+            .replace("  ", " "),
+        );
+    } else {
+        command.arg(&target);
+        emit_line(&app, &tab_id, format!("> {} {}", ant_exe, target));
+    }
+
     command.current_dir(&build_dir);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -2094,7 +3424,15 @@ pub fn run_ant_build(
         "BUILD FAILED".to_string()
     };
 
-    let inspection = inspect_target_files(&project_path, &target);
+    let inspection = inspect_target_files_with_target(
+        &project_path,
+        &target,
+        if validation.is_default_target {
+            None
+        } else {
+            Some(validation.effective_target_path.as_str())
+        },
+    );
 
     Ok(BuildResult {
         success: is_success,
@@ -2104,6 +3442,9 @@ pub fn run_ant_build(
         target,
         properties_file: inspection.properties_file,
         base_directory: inspection.base_directory,
+        default_target_path: inspection.default_target_path,
+        effective_target_path: inspection.effective_target_path,
+        is_default_target: inspection.is_default_target,
         bat_folder: inspection.bat_folder,
         bat_files: inspection.bat_files,
         batch_log_name: inspection.batch_log_name,
@@ -2849,7 +4190,14 @@ pub fn execute_bat_in_powershell(
     monitor_anchor: Option<(i32, i32)>,
 ) -> Result<BatLaunchResult, String> {
     let setting = crate::modules::app_config::load_user_setting();
-    execute_bat_in_powershell_with_setting(app, tab_id, path, project_path, &setting, monitor_anchor)
+    execute_bat_in_powershell_with_setting(
+        app,
+        tab_id,
+        path,
+        project_path,
+        &setting,
+        monitor_anchor,
+    )
 }
 
 /// Parameterized `.bat` launcher for deterministic testing and live execution.
@@ -2962,9 +4310,8 @@ pub fn execute_bat_in_powershell_with_setting(
                         let success = exit_code == Some(0);
 
                         let (shot_saved, shot_err) = if let Some(ref png_dest) = planned_png_clone {
-                            let file_non_empty = fs::metadata(png_dest)
-                                .map(|m| m.len() > 0)
-                                .unwrap_or(false);
+                            let file_non_empty =
+                                fs::metadata(png_dest).map(|m| m.len() > 0).unwrap_or(false);
                             match parsed {
                                 Some(ref m) => {
                                     let saved = m.screenshot_saved && file_non_empty;

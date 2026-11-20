@@ -4,7 +4,7 @@ use modules::ant_manager::{self, AntScanResult, AntTestResult, ExtractAntResult}
 use modules::app_config::{self, UserSetting};
 use modules::builder::{
     self, AutoConfigResult, BatFileInfo, BatGroupStepResult, BatLaunchResult, BuildResult,
-    ClearLogsResult, PostBuildInspection,
+    ClearLogsResult, PostBuildInspection, SetTargetPathResult, TargetPathValidation,
 };
 use modules::db_manager::{self, DatabaseConfigInfo, DatabaseTestResult};
 use modules::encoding;
@@ -205,10 +205,62 @@ async fn start_ant_build(
     target: String,
     ant_executable: Option<String>,
     java_home: Option<String>,
+    custom_target_path: Option<String>,
 ) -> Result<BuildResult, String> {
     let tid = tab_id.unwrap_or_default();
     tauri::async_runtime::spawn_blocking(move || {
-        builder::run_ant_build(app, tid, project_path, target, ant_executable, java_home)
+        builder::run_ant_build(
+            app,
+            tid,
+            project_path,
+            target,
+            ant_executable,
+            java_home,
+            custom_target_path,
+        )
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
+#[tauri::command]
+async fn validate_target_build_path(
+    project_path: String,
+    target: String,
+    custom_target_path: Option<String>,
+    java_home: Option<String>,
+) -> Result<TargetPathValidation, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        builder::validate_target_build_path(
+            &project_path,
+            &target,
+            custom_target_path.as_deref(),
+            java_home.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))
+}
+
+#[tauri::command]
+async fn get_project_target_path(project_path: String) -> Result<Option<String>, String> {
+    Ok(settings::get_project_target_path(&project_path))
+}
+
+#[tauri::command]
+async fn set_project_target_path(
+    project_path: String,
+    target: Option<String>,
+    custom_target_path: Option<String>,
+    java_home: Option<String>,
+) -> Result<SetTargetPathResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        builder::configure_project_target_path(
+            &project_path,
+            target.as_deref(),
+            custom_target_path.as_deref(),
+            java_home.as_deref(),
+        )
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
@@ -219,9 +271,15 @@ async fn run_auto_config(
     project_path: String,
     target: String,
     java_home: Option<String>,
+    custom_target_path: Option<String>,
 ) -> Result<AutoConfigResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        builder::run_auto_config(&project_path, &target, java_home.as_deref())
+        builder::run_auto_config_with_target(
+            &project_path,
+            &target,
+            java_home.as_deref(),
+            custom_target_path.as_deref(),
+        )
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
@@ -294,8 +352,16 @@ async fn execute_bat_group_step(
 }
 
 #[tauri::command]
-async fn inspect_build_target(project_path: String, target: String) -> Result<PostBuildInspection, String> {
-    Ok(builder::inspect_target_files(&project_path, &target))
+async fn inspect_build_target(
+    project_path: String,
+    target: String,
+    custom_target_path: Option<String>,
+) -> Result<PostBuildInspection, String> {
+    Ok(builder::inspect_target_files_with_target(
+        &project_path,
+        &target,
+        custom_target_path.as_deref(),
+    ))
 }
 
 #[tauri::command]
@@ -329,16 +395,18 @@ async fn open_file_log(
     project_path: Option<String>,
     target: Option<String>,
     file_name: Option<String>,
+    custom_target_path: Option<String>,
 ) -> Result<String, String> {
     let fname = file_name
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "No log file is configured in log4j properties for this project.".to_string())?;
-    builder::open_target_log_file(
+    builder::open_target_log_file_with_target(
         project_path.as_deref(),
         target.as_deref(),
         log_folder_path.as_deref(),
         &fname,
+        custom_target_path.as_deref(),
     )
 }
 
@@ -349,13 +417,15 @@ async fn clear_target_logs(
     log_folder_path: Option<String>,
     batch_log_name: Option<String>,
     app_log_name: Option<String>,
+    custom_target_path: Option<String>,
 ) -> Result<ClearLogsResult, String> {
-    builder::clear_target_log_files(
+    builder::clear_target_log_files_with_target(
         project_path.as_deref(),
         target.as_deref(),
         log_folder_path.as_deref(),
         batch_log_name.as_deref(),
         app_log_name.as_deref(),
+        custom_target_path.as_deref(),
     )
 }
 
@@ -617,6 +687,9 @@ pub fn run() {
             save_user_setting,
             get_user_setting_path,
             start_ant_build,
+            validate_target_build_path,
+            get_project_target_path,
+            set_project_target_path,
             run_auto_config,
             read_text_file,
             open_file_default,

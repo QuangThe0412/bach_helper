@@ -46,6 +46,34 @@
           </div>
         </div>
 
+        <!-- Row 1b: Target Build Path (TARGET_HOME) & Pre-build Validation -->
+        <div class="toolbar-row target-path-row">
+          <label for="target-build-path-input" class="row-label" title="Target build output directory (TARGET_HOME / Ant target.dir)">Target Dir:</label>
+          <input
+            id="target-build-path-input"
+            type="text"
+            class="input-path input-target-path"
+            placeholder="Default: &lt;project&gt;\target (select a shorter path if warning appears)"
+          />
+          <button id="btn-browse-target-path" class="win95-btn" title="Select custom Target Build Path (TARGET_HOME)" disabled>
+            Browse...
+          </button>
+          <button id="btn-reset-target-path" class="win95-btn" title="Reset Target Build Path to project default" disabled>
+            Default
+          </button>
+          <span id="badge-target-path-status" class="badge badge-gray target-path-status-badge" title="Pre-build Windows CMD/BAT path length validation">
+            PATH: N/A
+          </span>
+        </div>
+
+        <div id="target-path-warning-bar" class="target-path-warning-bar" style="display: none;">
+          <span class="target-path-warning-icon">[!]</span>
+          <span id="target-path-warning-text" class="target-path-warning-text"></span>
+          <button id="btn-fix-target-path-inline" type="button" class="win95-btn btn-xs btn-bold">
+            Change Target Dir...
+          </button>
+        </div>
+
         <!-- Row 2: Target Selection & Build Button -->
         <div class="toolbar-row build-control-row">
           <label for="select-ant-target" class="row-label">Target:</label>
@@ -614,6 +642,10 @@
                   <td id="autoconfig-target-name" class="text-bold">-</td>
                 </tr>
                 <tr>
+                  <td class="lbl">Target Build Dir:</td>
+                  <td><div id="autoconfig-target-dir" class="path-scroll-box text-mono">-</div></td>
+                </tr>
+                <tr>
                   <td class="lbl">Resolved Java Home:</td>
                   <td><div id="autoconfig-java-home" class="path-scroll-box text-mono">-</div></td>
                 </tr>
@@ -769,6 +801,69 @@
             </button>
             <button id="modal-btn-cancel-clear-log" class="win95-btn">
               Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL 9: PRE-BUILD TARGET PATH VALIDATION WARNING -->
+    <div id="modal-target-path-warning" class="win95-modal-backdrop" style="display: none;">
+      <div class="window win95-modal-window modal-target-warning-window">
+        <div class="title-bar">
+          <div class="title-bar-text">Build Blocked - Target Path Validation Warning</div>
+          <div class="title-bar-controls">
+            <button aria-label="Close" id="btn-close-modal-target-warning"></button>
+          </div>
+        </div>
+        <div class="window-body modal-content-box">
+          <div class="modal-scroll-area">
+            <div class="modal-flex-content" style="align-items: flex-start; padding-top: 2px;">
+              <div class="modal-big-icon" style="color: #cc0000;">[!]</div>
+              <div id="tpw-summary" class="modal-msg-text text-bold">
+                The current Target Build Path exceeds Windows command-line or path limits and could fail during BAT execution.
+              </div>
+            </div>
+
+            <fieldset class="win95-box">
+              <legend><b>Validation Diagnostics</b></legend>
+              <table class="modal-info-table autoconfig-target-table">
+                <tr>
+                  <td class="lbl">Current Target Dir:</td>
+                  <td><div id="tpw-current-path" class="path-scroll-box text-mono">-</div></td>
+                </tr>
+                <tr>
+                  <td class="lbl">Estimated CMD Line:</td>
+                  <td id="tpw-cmd-usage" class="text-mono">-</td>
+                </tr>
+                <tr>
+                  <td class="lbl">Longest Output Path:</td>
+                  <td id="tpw-max-path-usage" class="text-mono">-</td>
+                </tr>
+                <tr>
+                  <td class="lbl">Max Safe Target Dir:</td>
+                  <td id="tpw-safe-limit" class="text-bold">-</td>
+                </tr>
+                <tr>
+                  <td class="lbl">Detected Issue At:</td>
+                  <td><div id="tpw-offending-script" class="path-scroll-box text-mono">-</div></td>
+                </tr>
+              </table>
+            </fieldset>
+
+            <fieldset class="win95-box" style="margin-top: 8px !important;">
+              <legend><b>Issues Detected</b></legend>
+              <div id="tpw-details-list" class="autoconfig-summary" style="margin-top: 2px;"></div>
+            </fieldset>
+          </div>
+
+          <div class="modal-bottom-bar">
+            <button id="modal-btn-pick-shorter-target" class="win95-btn btn-bold">
+              Select Shorter Target Dir...
+            </button>
+            <div class="flex-spacer"></div>
+            <button id="modal-btn-close-target-warning" class="win95-btn">
+              Close
             </button>
           </div>
         </div>

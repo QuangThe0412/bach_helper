@@ -36,6 +36,8 @@ pub struct AppSettings {
     pub active_tab_index: usize,
     #[serde(default)]
     pub project_groups: HashMap<String, Vec<BatchGroup>>,
+    #[serde(default)]
+    pub project_target_paths: HashMap<String, String>,
 }
 
 impl Default for AppSettings {
@@ -50,6 +52,7 @@ impl Default for AppSettings {
             open_tabs: Vec::new(),
             active_tab_index: 0,
             project_groups: HashMap::new(),
+            project_target_paths: HashMap::new(),
         }
     }
 }
@@ -418,4 +421,60 @@ pub fn delete_batch_group(project_path: &str, group_id: &str) -> Result<Vec<Batc
     }
 
     Ok(Vec::new())
+}
+
+pub fn get_project_target_path(project_path: &str) -> Option<String> {
+    let key = normalize_project_key(project_path);
+    if key.is_empty() {
+        return None;
+    }
+    let settings = load_settings();
+    settings
+        .project_target_paths
+        .get(&key)
+        .map(|s| s.trim().trim_matches('"').to_string())
+        .filter(|s| !s.is_empty())
+}
+
+pub fn set_project_target_path(
+    project_path: &str,
+    target_path: Option<&str>,
+) -> Result<Option<String>, String> {
+    let key = normalize_project_key(project_path);
+    if key.is_empty() {
+        return Err("Please select a project directory before setting a target path.".to_string());
+    }
+
+    let mut settings = load_settings();
+    let stored = match target_path {
+        Some(raw) => {
+            let trimmed = raw.trim().trim_matches('"');
+            if trimmed.is_empty() {
+                settings.project_target_paths.remove(&key);
+                None
+            } else {
+                let mut norm = trimmed.replace('/', "\\");
+                let is_drive_root = norm.len() == 3
+                    && norm.as_bytes().get(1) == Some(&b':')
+                    && norm.ends_with('\\');
+                if !is_drive_root && !norm.starts_with(r"\\") {
+                    norm = norm.trim_end_matches('\\').to_string();
+                } else if norm.starts_with(r"\\") {
+                    let rest = norm.trim_end_matches('\\');
+                    if rest.len() > 2 {
+                        norm = rest.to_string();
+                    }
+                }
+                settings.project_target_paths.insert(key, norm.clone());
+                Some(norm)
+            }
+        }
+        None => {
+            settings.project_target_paths.remove(&key);
+            None
+        }
+    };
+
+    save_settings(&settings)?;
+    Ok(stored)
 }

@@ -1360,4 +1360,399 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    #[test]
+    fn test_detect_ant_target_properties_and_default_path() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!("bh_ant_props_{}", unique));
+        let proj = base.join("sample_proj");
+        let build_dir = proj.join("build");
+        std::fs::create_dir_all(&build_dir).unwrap();
+
+        let build_xml = r#"<project name="demo" default="development-package" basedir=".">
+  <property name="target.dir" value="../target" />
+  <property name="build.dir" value="../target/classes" />
+  <target name="development-package">
+    <property file="filters/development.properties" />
+  </target>
+  <target name="production-package">
+    <property name="env.dir" value="/20-honban-psp/syohinjiseki" />
+    <property file="filters/production.properties" />
+  </target>
+</project>"#;
+        std::fs::write(build_dir.join("build.xml"), build_xml).unwrap();
+
+        let dev_props = detect_ant_target_properties(&proj.to_string_lossy(), Some("development-package"));
+        assert_eq!(dev_props.target_prop_name, "target.dir");
+        assert_eq!(dev_props.build_classes_prop_name, "build.dir");
+        assert_eq!(
+            dev_props.default_target_path.to_lowercase(),
+            proj.join("target").to_string_lossy().to_lowercase()
+        );
+        assert!(dev_props.env_dir.is_none());
+
+        let prod_props = detect_ant_target_properties(&proj.to_string_lossy(), Some("production-package"));
+        assert_eq!(prod_props.env_dir.as_deref(), Some("20-honban-psp/syohinjiseki"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_validate_target_build_path_cmd_limit_exact() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!("bh_cmd_limit_{}", unique));
+        let proj = base.join("cmd_proj");
+        let build_filters = proj.join("build").join("filters");
+        let batfiles_dir = proj.join("batch").join("batfiles");
+        std::fs::create_dir_all(&build_filters).unwrap();
+        std::fs::create_dir_all(&batfiles_dir).unwrap();
+
+        std::fs::write(
+            proj.join("build").join("build.xml"),
+            r#"<project default="development-package"><property name="target.dir" value="../target"/><property name="build.dir" value="../target/classes"/><target name="development-package"><property file="filters/development.properties"/></target></project>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            build_filters.join("development.properties"),
+            "artifactId=mdw_corepkgsyohinjiseki-batch\nfilter.shellscript.baseDirectory.value=C:/tmp/target\nfilter.javahome.baseDirectory.value=C:/jdk-25.0.2\n",
+        )
+        .unwrap();
+
+        let mut set_lines = vec![
+            "@echo off".to_string(),
+            "set  JAVA_HOME=@filter.javahome.baseDirectory.value@".to_string(),
+            "set  BATCH_HOME=@filter.shellscript.baseDirectory.value@".to_string(),
+            "set  JRECLASSPATH=\"".to_string(),
+            "set  JRECLASSPATH=%JRECLASSPATH%%BATCH_HOME%\\@artifactId@.jar;".to_string(),
+        ];
+        for idx in 1..=67 {
+            set_lines.push(format!(
+                "set  JRECLASSPATH=%JRECLASSPATH%%BATCH_HOME%\\lib\\dependency-jar-number-{:02}.jar;",
+                idx
+            ));
+        }
+        set_lines.push("set  JRECLASSPATH=%JRECLASSPATH%\"".to_string());
+        set_lines.push(
+            "set  EXECJAVA=\"%JAVA_HOME%\\bin\\java\" -Xms192m -Xmx512m -classpath %JRECLASSPATH% -Dfile.encoding=MS932"
+                .to_string(),
+        );
+        std::fs::write(proj.join("batch").join("SetBatchPath.bat"), set_lines.join("\r\n")).unwrap();
+        std::fs::write(
+            batfiles_dir.join("SYJB040010_YobiJikantaiTableCreate.bat"),
+            "SET BATCHF_HOME=@filter.shellscript.baseDirectory.value@\r\nCALL %BATCHF_HOME%\\batch\\SetBatchPath.bat\r\n%EXECJAVA% jp.co.vinculumjapan.swc.commons.dao.BatchController SYJB040010\r\n",
+        )
+        .unwrap();
+
+        // 1. Long custom target (125 chars) -> MUST fail with exact CMD line violation
+        let long_custom = format!("C:\\{}", "x".repeat(122));
+        assert_eq!(long_custom.len(), 125);
+        let res_long = validate_target_build_path(
+            &proj.to_string_lossy(),
+            "development-package",
+            Some(&long_custom),
+            Some("C:\\jdk-25.0.2"),
+        );
+        assert!(!res_long.is_valid);
+        assert_eq!(res_long.severity, "error");
+        assert!(res_long.estimated_cmd_line_len > WINDOWS_CMD_LINE_LIMIT);
+        assert_eq!(res_long.jar_reference_count, 68);
+        assert!(res_long.offending_script.is_some());
+        assert!(res_long.offending_line_number.is_some());
+
+        // 2. Short custom target ("C:\\bh\\s1", 8 chars) -> MUST pass well below 8,191 limit
+        let res_short = validate_target_build_path(
+            &proj.to_string_lossy(),
+            "development-package",
+            Some(r"C:\bh\s1"),
+            Some("C:\\jdk-25.0.2"),
+        );
+        assert!(res_short.is_valid, "Expected short target valid: {:?}", res_short);
+        assert!(res_short.estimated_cmd_line_len < WINDOWS_CMD_LINE_LIMIT);
+        assert!(!res_short.is_default_target);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_validate_target_build_path_rejects_dangerous_and_max_path() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!("bh_safety_{}", unique));
+        let proj = base.join("safe_proj");
+        std::fs::create_dir_all(proj.join("build").join("filters")).unwrap();
+        std::fs::create_dir_all(proj.join("batch").join("properties")).unwrap();
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::write(
+            proj.join("build").join("build.xml"),
+            r#"<project default="development-package"><property name="target.dir" value="../target"/><target name="development-package"/></project>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("batch").join("properties").join("very_long_config_filename_inside_batch.properties.filter"),
+            "k=v\n",
+        )
+        .unwrap();
+
+        for dangerous in [
+            r"C:\",
+            proj.to_string_lossy().as_ref(),
+            proj.join("src").to_string_lossy().as_ref(),
+            proj.join("batch").join("batfiles").to_string_lossy().as_ref(),
+            r"C:\bh target\space dir",
+            r"C:\bh_target\bad&name",
+            "relative\\target",
+        ] {
+            let v = validate_target_build_path(&proj.to_string_lossy(), "development-package", Some(dangerous), None);
+            assert!(
+                !v.is_valid,
+                "Expected dangerous path '{}' to be rejected: {:?}",
+                dangerous, v
+            );
+        }
+
+        // MAX_PATH >= 260 test
+        let deep_target = format!(r"C:\{}", "a".repeat(220));
+        let v_max = validate_target_build_path(&proj.to_string_lossy(), "development-package", Some(&deep_target), None);
+        assert!(!v_max.is_valid);
+        assert!(v_max.estimated_longest_file_path_len >= WINDOWS_MAX_PATH_LIMIT);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_custom_target_path_properties_sync_and_reset() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!("bh_sync_props_{}", unique));
+        let proj = base.join("sync_proj");
+        let build_filters = proj.join("build").join("filters");
+        std::fs::create_dir_all(&build_filters).unwrap();
+        std::fs::write(
+            proj.join("build").join("build.xml"),
+            r#"<project default="development-package"><property name="target.dir" value="../target"/><target name="development-package"><property file="filters/development.properties"/></target></project>"#,
+        )
+        .unwrap();
+
+        let prop_file = build_filters.join("development.properties");
+        let orig_content = [
+            "artifactId=demo-batch",
+            "pom.db.host.value=10.0.0.1",
+            "filter.javahome.baseDirectory.value=C:/jdk-25.0.2",
+            &format!(
+                "filter.shellscript.baseDirectory.value={}/target",
+                proj.to_string_lossy().replace('\\', "/")
+            ),
+            &format!(
+                "pom.log4j.path.value={}/target/log/",
+                proj.to_string_lossy().replace('\\', "/")
+            ),
+            &format!(
+                "filter.resources.propertiesLocation={}/target/batch/properties",
+                proj.to_string_lossy().replace('\\', "/")
+            ),
+            "filter.shellscript.baseDirectory2.value=D:/unrelated/other",
+        ]
+        .join("\r\n");
+        std::fs::write(&prop_file, &orig_content).unwrap();
+
+        // Step 1: Switch default -> custom1
+        assert!(sync_properties_target_path(
+            &prop_file,
+            &proj.to_string_lossy(),
+            Some(r"C:\bh_t\c1")
+        ));
+        let after_c1 = std::fs::read_to_string(&prop_file).unwrap();
+        assert!(after_c1.contains("filter.shellscript.baseDirectory.value=C:/bh_t/c1"));
+        assert!(after_c1.contains("pom.log4j.path.value=C:/bh_t/c1/log/"));
+        assert!(after_c1.contains("filter.resources.propertiesLocation=C:/bh_t/c1/batch/properties"));
+        assert!(after_c1.contains("filter.javahome.baseDirectory.value=C:/jdk-25.0.2"));
+        assert!(after_c1.contains("filter.shellscript.baseDirectory2.value=D:/unrelated/other"));
+
+        // Step 2: Switch custom1 -> custom2 (remember c1 does NOT end in /target)
+        assert!(sync_properties_target_path(
+            &prop_file,
+            &proj.to_string_lossy(),
+            Some(r"C:\bh_t\c2")
+        ));
+        let after_c2 = std::fs::read_to_string(&prop_file).unwrap();
+        assert!(after_c2.contains("filter.shellscript.baseDirectory.value=C:/bh_t/c2"));
+        assert!(after_c2.contains("pom.log4j.path.value=C:/bh_t/c2/log/"));
+        assert!(after_c2.contains("filter.resources.propertiesLocation=C:/bh_t/c2/batch/properties"));
+
+        // Step 3: Reset custom2 -> default (None)
+        assert!(sync_properties_target_path(&prop_file, &proj.to_string_lossy(), None));
+        let after_def = std::fs::read_to_string(&prop_file).unwrap();
+        let proj_slash = proj.to_string_lossy().replace('\\', "/");
+        assert!(after_def.contains(&format!("filter.shellscript.baseDirectory.value={}/target", proj_slash)));
+        assert!(after_def.contains(&format!("pom.log4j.path.value={}/target/log/", proj_slash)));
+        assert!(after_def.contains("pom.db.host.value=10.0.0.1"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_custom_target_path_scan_bat_and_logs() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!("bh_ext_target_{}", unique));
+        let proj = base.join("proj");
+        let stale_default_bat = proj.join("target").join("batch").join("batfiles");
+        let ext_target = base.join("short_out");
+        let ext_bat = ext_target.join("batch").join("batfiles");
+        let ext_log = ext_target.join("log");
+        let stale_log = proj.join("target").join("log");
+
+        std::fs::create_dir_all(&stale_default_bat).unwrap();
+        std::fs::create_dir_all(&ext_bat).unwrap();
+        std::fs::create_dir_all(&ext_log).unwrap();
+        std::fs::create_dir_all(&stale_log).unwrap();
+        std::fs::create_dir_all(proj.join("build").join("filters")).unwrap();
+        std::fs::create_dir_all(proj.join("batch").join("properties")).unwrap();
+
+        std::fs::write(
+            proj.join("build").join("build.xml"),
+            r#"<project default="development-package"><property name="target.dir" value="../target"/><target name="development-package"><property file="filters/development.properties"/></target></project>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("batch").join("properties").join("stcliblog4j.properties.filter"),
+            "log4j.appender.B.File=@pom.log4j.path.value@/batchApp.log\nlog4j.appender.A.File=@pom.log4j.path.value@/stclibApp.log\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("build").join("filters").join("development.properties"),
+            format!(
+                "filter.shellscript.baseDirectory.value={}\npom.log4j.path.value={}/log/\n",
+                ext_target.to_string_lossy().replace('\\', "/"),
+                ext_target.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+
+        std::fs::write(stale_default_bat.join("STALE_ONLY.bat"), "echo stale").unwrap();
+        std::fs::write(ext_bat.join("CUSTOM_ONLY.bat"), "echo custom").unwrap();
+        std::fs::write(stale_log.join("batchApp.log"), "KEEP_STALE_DEFAULT_LOG").unwrap();
+        std::fs::write(ext_log.join("batchApp.log"), "CUSTOM_LOG_CONTENT").unwrap();
+
+        let insp_custom = inspect_target_files_with_target(
+            &proj.to_string_lossy(),
+            "development-package",
+            Some(&ext_target.to_string_lossy()),
+        );
+        assert!(!insp_custom.is_default_target);
+        assert_eq!(insp_custom.bat_files.len(), 1);
+        assert_eq!(insp_custom.bat_files[0].name, "CUSTOM_ONLY.bat");
+        assert!(insp_custom
+            .log_file_path
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("short_out"));
+
+        let clr = clear_target_log_files_with_target(
+            Some(&proj.to_string_lossy()),
+            Some("development-package"),
+            None,
+            Some("batchApp.log"),
+            None,
+            Some(&ext_target.to_string_lossy()),
+        )
+        .unwrap();
+        assert_eq!(clr.cleared_files.len(), 1);
+        assert_eq!(std::fs::metadata(ext_log.join("batchApp.log")).unwrap().len(), 0);
+        assert_eq!(
+            std::fs::read_to_string(stale_log.join("batchApp.log")).unwrap(),
+            "KEEP_STALE_DEFAULT_LOG"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_settings_project_target_paths_persistence() {
+        let original = load_settings();
+        let fake_proj = r"C:\NonExistentDemo\TargetPathPersistTest";
+
+        assert!(get_project_target_path(fake_proj).is_none());
+        let saved = set_project_target_path(fake_proj, Some("C:/bh_target/demo/"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved, r"C:\bh_target\demo");
+        assert_eq!(get_project_target_path(fake_proj).as_deref(), Some(r"C:\bh_target\demo"));
+
+        let cleared = set_project_target_path(fake_proj, None).unwrap();
+        assert!(cleared.is_none());
+        assert!(get_project_target_path(fake_proj).is_none());
+
+        let _ = save_settings(&original);
+    }
+
+    #[test]
+    fn test_validate_real_workspace_projects_read_only() {
+        let onedrive_dir = "OneDrive - \u{682a}\u{5f0f}\u{4f1a}\u{793e}\u{30f4}\u{30a3}\u{30f3}\u{30af}\u{30b9}";
+        let syohin = std::path::PathBuf::from(r"C:\Users\09204113161")
+            .join(onedrive_dir)
+            .join("Desktop")
+            .join("code")
+            .join("yoshizuya")
+            .join("yoshizuya-corepkg")
+            .join("yoshizuya-corepkg")
+            .join("mdw_corepkgsyohinjiseki-batch");
+        if syohin.is_dir() {
+            let v_def = validate_target_build_path(
+                &syohin.to_string_lossy(),
+                "development-package",
+                None,
+                None,
+            );
+            println!("Real syohinjiseki default validation: {:?}", v_def);
+            assert!(v_def.is_default_target);
+            assert!(!v_def.is_valid);
+            assert!(v_def.estimated_cmd_line_len > WINDOWS_CMD_LINE_LIMIT);
+            assert_eq!(v_def.jar_reference_count, 68);
+
+            let v_short = validate_target_build_path(
+                &syohin.to_string_lossy(),
+                "development-package",
+                Some(r"C:\bh_target\syohin"),
+                None,
+            );
+            println!("Real syohinjiseki short target validation: {:?}", v_short);
+            assert!(v_short.is_valid);
+            assert!(v_short.estimated_cmd_line_len < WINDOWS_CMD_LINE_LIMIT);
+        }
+
+        let order = std::path::PathBuf::from(r"C:\Users\09204113161")
+            .join(onedrive_dir)
+            .join("Desktop")
+            .join("code")
+            .join("yoshizuya")
+            .join("yoshizuya-corepkg")
+            .join("yoshizuya-corepkg")
+            .join("mdw_corepkgordercommon-batch");
+        if order.is_dir() {
+            let v_ord = validate_target_build_path(
+                &order.to_string_lossy(),
+                "development-package",
+                None,
+                None,
+            );
+            println!("Real ordercommon default validation: {:?}", v_ord);
+            assert!(v_ord.is_default_target);
+            assert!(v_ord.is_valid);
+            assert!(v_ord.estimated_cmd_line_len < WINDOWS_CMD_LINE_LIMIT);
+        }
+    }
 }
