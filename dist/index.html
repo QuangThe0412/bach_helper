@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>BATCH HELPER</title>
     <link rel="icon" type="image/svg+xml" href="./assets/batch-helper-logo.svg" />
-    <script type="module" crossorigin src="/assets/index-HYoSqvto.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DeLuTgRP.css">
+    <script type="module" crossorigin src="/assets/index-DsaWPc8p.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-vC81rebm.css">
   </head>
   <body>
     <div class="app-container">
@@ -87,6 +87,14 @@
 
           <button id="btn-run-build" class="win95-btn btn-build btn-bold" disabled>
             Build
+          </button>
+          <button
+            id="btn-cancel-build"
+            class="win95-btn btn-cancel-danger btn-bold"
+            title="Cancel ongoing build and terminate child processes"
+            style="display: none;"
+          >
+            Cancel Build
           </button>
 
           <div class="build-status-wrapper">
@@ -260,10 +268,6 @@
           <span class="footer-label"><b>Settings:</b></span>
           <span id="footer-config-val" class="footer-val">1000x650</span>
           <span class="footer-gear" aria-hidden="true"><svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M9.4 1.5l.4 1.7c.5.2 1 .5 1.4.8l1.6-.6 1.4 2.4-1.3 1.1c.1.4.1.8.1 1.1s0 .7-.1 1.1l1.3 1.1-1.4 2.4-1.6-.6c-.4.3-.9.6-1.4.8l-.4 1.7H6.6l-.4-1.7c-.5-.2-1-.5-1.4-.8l-1.6.6-1.4-2.4 1.3-1.1c-.1-.4-.1-.8-.1-1.1s0-.7.1-1.1L1.8 5.8l1.4-2.4 1.6.6c.4-.3.9-.6 1.4-.8l.4-1.7h2.8zM8 5.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5z"/></svg></span>
-        </div>
-
-        <div id="footer-settings-info" class="status-bar-field footer-settings" title="AppData history.json file path">
-          <span id="footer-settings-val" class="footer-val text-truncate">History: Loading...</span>
         </div>
 
         <div id="footer-status-pill" class="status-bar-field footer-pill">
@@ -684,8 +688,17 @@
           </div>
         </div>
         <div class="window-body modal-content-box">
-          <div id="group-run-summary" class="autoconfig-summary">
-            Preparing group execution...
+          <div class="group-run-header-bar">
+            <div id="group-run-summary" class="autoconfig-summary group-run-summary-box">
+              Preparing group execution...
+            </div>
+            <div
+              id="group-run-elapsed-box"
+              class="group-run-elapsed-box"
+              title="Total elapsed time for Run All execution in minutes"
+            >
+              Total Time: <b id="group-run-elapsed-val">0.00 min (00:00)</b>
+            </div>
           </div>
 
           <div class="group-run-table-wrap">
@@ -714,6 +727,14 @@
               Open Image
             </button>
             <div class="flex-spacer"></div>
+            <button
+              id="modal-btn-stop-group-run"
+              class="win95-btn btn-cancel-danger btn-bold"
+              title="Stop sequential execution immediately and terminate active child processes"
+              style="display: none; margin-right: 6px;"
+            >
+              Stop All
+            </button>
             <button id="modal-btn-close-group-run" class="win95-btn btn-bold">
               Close
             </button>
@@ -800,6 +821,35 @@
               Yes, Clear All Log
             </button>
             <button id="modal-btn-cancel-clear-log" class="win95-btn">
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL 8b: CONFIRM DELETE BATCH GROUP -->
+    <div id="modal-confirm-delete-group" class="win95-modal-backdrop" style="display: none;">
+      <div class="window win95-modal-window modal-small" style="width: 450px;">
+        <div class="title-bar">
+          <div class="title-bar-text">Confirm Delete Group</div>
+          <div class="title-bar-controls">
+            <button aria-label="Close" id="btn-close-modal-delete-group"></button>
+          </div>
+        </div>
+        <div class="window-body modal-content-box">
+          <div class="modal-flex-content" style="align-items: flex-start;">
+            <div class="modal-big-icon">[!]</div>
+            <div id="delete-group-confirm-msg" class="modal-msg-text">
+              Delete this batch group?
+            </div>
+          </div>
+          <div class="modal-bottom-bar">
+            <div class="flex-spacer"></div>
+            <button id="modal-btn-confirm-delete-group" class="win95-btn btn-cancel-danger btn-bold" style="margin-right: 6px;">
+              Yes, Delete Group
+            </button>
+            <button id="modal-btn-cancel-delete-group" class="win95-btn">
               Cancel
             </button>
           </div>

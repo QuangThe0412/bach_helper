@@ -439,6 +439,17 @@ input[type="submit"]:disabled {
     color: #777777 !important;
   }
 
+  .btn-cancel-danger {
+    font-weight: bold !important;
+    height: 24px;
+    padding: 0 12px !important;
+    color: #990000 !important;
+  }
+
+  .btn-cancel-danger:disabled {
+    color: #777777 !important;
+  }
+
   .build-status-wrapper {
     margin-left: 4px;
   }
@@ -939,6 +950,30 @@ input[type="submit"]:disabled {
         color: #0a3254;
       }
 
+      .bat-table tbody tr.bat-status-cancelled,
+      .group-run-table tbody tr.bat-status-cancelled {
+        background-color: #fde6d8;
+        color: #7c2d12;
+        box-shadow: inset 4px 0 0 #ea580c;
+      }
+      .bat-table tbody tr.bat-status-cancelled:hover,
+      .group-run-table tbody tr.bat-status-cancelled:hover {
+        background-color: #fbd5be;
+        color: #7c2d12;
+      }
+
+      .bat-table tbody tr.bat-status-not-started,
+      .group-run-table tbody tr.bat-status-not-started {
+        background-color: #eceff3;
+        color: #334155;
+        box-shadow: inset 4px 0 0 #64748b;
+      }
+      .bat-table tbody tr.bat-status-not-started:hover,
+      .group-run-table tbody tr.bat-status-not-started:hover {
+        background-color: #dfe4ec;
+        color: #334155;
+      }
+
       /* Selection highlight preserved alongside execution status accent */
       .bat-table tbody tr.selected-row,
       .bat-table tbody tr.selected-row:hover {
@@ -972,6 +1007,20 @@ input[type="submit"]:disabled {
         background-color: #000080;
         color: #ffffff;
         box-shadow: inset 5px 0 0 #38bdf8;
+      }
+
+      .bat-table tbody tr.selected-row.bat-status-cancelled,
+      .bat-table tbody tr.selected-row.bat-status-cancelled:hover {
+        background-color: #000080;
+        color: #ffffff;
+        box-shadow: inset 5px 0 0 #fb923c;
+      }
+
+      .bat-table tbody tr.selected-row.bat-status-not-started,
+      .bat-table tbody tr.selected-row.bat-status-not-started:hover {
+        background-color: #000080;
+        color: #ffffff;
+        box-shadow: inset 5px 0 0 #94a3b8;
       }
 
       .bat-table tbody tr.selected-row td {
@@ -1028,6 +1077,16 @@ input[type="submit"]:disabled {
 
       .bat-tag-running {
         background-color: #0284c7;
+        color: #ffffff;
+      }
+
+      .bat-tag-cancelled {
+        background-color: #ea580c;
+        color: #ffffff;
+      }
+
+      .bat-tag-not-started {
+        background-color: #64748b;
         color: #ffffff;
       }
 
@@ -1095,6 +1154,30 @@ input[type="submit"]:disabled {
       }
       #bat-table-container.theme-dark .bat-table tbody tr.bat-status-running:hover {
         background-color: #1b4569;
+      }
+
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-cancelled {
+        background-color: #4a2511;
+        color: #fed7aa;
+        box-shadow: inset 4px 0 0 #fb923c;
+      }
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-cancelled td {
+        color: #fed7aa;
+      }
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-cancelled:hover {
+        background-color: #5e3017;
+      }
+
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-not-started {
+        background-color: #2d333b;
+        color: #cbd5e1;
+        box-shadow: inset 4px 0 0 #94a3b8;
+      }
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-not-started td {
+        color: #cbd5e1;
+      }
+      #bat-table-container.theme-dark .bat-table tbody tr.bat-status-not-started:hover {
+        background-color: #3b434d;
       }
 
       #bat-table-container.theme-dark .bat-table tbody tr.selected-row,
@@ -1210,50 +1293,30 @@ input[type="submit"]:disabled {
       }
 
       #footer-ant-btn {
-        flex: 0 1 138px;
-        min-width: 88px;
-      }
-
-      #footer-java-btn {
-        flex: 0 1 142px;
+        flex: 1 1 130px;
         min-width: 90px;
       }
 
+      #footer-java-btn {
+        flex: 1 1 135px;
+        min-width: 92px;
+      }
+
       #footer-db-btn {
-        flex: 0 1 180px;
-        min-width: 96px;
+        flex: 1.35 1 180px;
+        min-width: 110px;
       }
 
       #footer-config-btn {
-        flex: 0 1 196px;
-        min-width: 118px;
-      }
-
-      .footer-settings {
-        flex: 1 1 110px;
-        min-width: 60px;
-        display: flex;
-        align-items: center;
-        gap: 4px;
-        padding: 0 8px !important;
-        overflow: hidden;
-      }
-
-      #footer-settings-val {
-        display: block;
-        flex: 1 1 0;
-        min-width: 0;
-        max-width: 100%;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        flex: 1.4 1 190px;
+        min-width: 120px;
       }
 
       .footer-pill {
         flex: 0 0 auto;
         width: auto;
-        min-width: 196px;
-        max-width: 280px;
+        min-width: 210px;
+        max-width: 300px;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -1335,6 +1398,16 @@ input[type="submit"]:disabled {
 
       .badge-blue {
         background-color: #000080;
+        color: #ffffff;
+      }
+
+      .badge-cancelled {
+        background-color: #c2410c;
+        color: #ffffff;
+      }
+
+      .badge-not-started {
+        background-color: #64748b;
         color: #ffffff;
       }
 
@@ -1548,6 +1621,33 @@ input[type="submit"]:disabled {
 
       .path-scroll-box.modal-desc-note {
         padding: 3px 6px;
+      }
+
+      .group-run-header-bar {
+        display: flex;
+        align-items: stretch;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+
+      .group-run-summary-box {
+        flex: 1 1 auto;
+        min-width: 0;
+        margin-bottom: 0 !important;
+      }
+
+      .group-run-elapsed-box {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        padding: 4px 10px;
+        background-color: #ffffff;
+        border: 1px solid #808080;
+        box-shadow: inset 1px 1px #0a0a0a, inset -1px -1px #ffffff;
+        font-family: "Consolas", monospace;
+        font-size: 11px;
+        color: #000080;
+        white-space: nowrap;
       }
 
       .group-run-table-wrap {

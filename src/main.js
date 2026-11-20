@@ -37,6 +37,13 @@ let groupRunSteps = [];
 let groupRunSelectedIdx = 0;
 let activeGroupRunLocked = false;
 let runningGroupId = null;
+let groupRunSeq = 0;
+let activeGroupRunId = '';
+let groupRunStopRequested = false;
+let groupRunStartedAtMs = 0;
+let groupRunElapsedFinalMs = null;
+let groupRunTimerInterval = null;
+let pendingDeleteGroupCtx = null;
 let addGroupPendingTabId = '';
 let addGroupPendingFiles = [];
 let batListActive = false;
@@ -70,6 +77,7 @@ function closeAllRegularModals() {
     'modal-auto-config',
     'modal-add-group',
     'modal-confirm-clear-log',
+    'modal-confirm-delete-group',
     'modal-target-path-warning',
   ];
   modalIds.forEach((id) => {
@@ -99,6 +107,7 @@ function isAnyModalVisible() {
     'modal-add-group',
     'modal-group-run',
     'modal-confirm-clear-log',
+    'modal-confirm-delete-group',
     'modal-target-path-warning',
   ];
   return modalIds.some((id) => isModalVisible(id));
@@ -184,6 +193,7 @@ function createTabState(projectPath = '') {
     footerStatusTime: '',
     footerStatusKind: 'neutral',
     isBuilding: false,
+    isCancellingBuild: false,
     isGroupRunning: false,
     cmdPanelOpen: false,
     cmdPanelExpanded: false,
@@ -562,6 +572,13 @@ function syncUIToActiveTab() {
     buildBtn.disabled = !hasTargets || tab.isBuilding;
   }
 
+  const cancelBuildBtn = document.getElementById('btn-cancel-build');
+  if (cancelBuildBtn) {
+    cancelBuildBtn.style.display = tab.isBuilding ? 'inline-flex' : 'none';
+    cancelBuildBtn.disabled = !tab.isBuilding || !!tab.isCancellingBuild;
+    cancelBuildBtn.textContent = tab.isCancellingBuild ? 'Cancelling...' : 'Cancel Build';
+  }
+
   // 3. Build Status Badge & CMD Drawer State
   const badgeStatus = document.getElementById('badge-build-status');
   if (badgeStatus) {
@@ -678,13 +695,6 @@ function appendBuildLogForTab(tabId, line) {
 // ==========================================================================
 async function loadSettings() {
   try {
-    const settingsPath = await invoke('get_settings_path');
-    const footerSettings = document.getElementById('footer-settings-val');
-    if (footerSettings) {
-      footerSettings.textContent = `History: ${settingsPath}`;
-      footerSettings.title = `History file: ${settingsPath}`;
-    }
-
     const settings = await invoke('get_settings');
     historyListCache = settings.history || [];
 
@@ -1916,14 +1926,16 @@ function getFilteredBatFiles(tab = getActiveTab()) {
   return filterBatFilesByPrefixes(baseFiles, rawQuery);
 }
 
-function getSelectedFilesInDisplayOrder(tab = getActiveTab()) {
+function getSelectedFilesInDisplayOrder(tab = getActiveTab(), includeMissing = false) {
   if (!tab) return [];
   const selectedSet = new Set((tab.selectedBatPaths || []).map((p) => p.toLowerCase()));
   if (selectedSet.size === 0 && tab.selectedBatPath) {
     selectedSet.add(tab.selectedBatPath.toLowerCase());
   }
   const filtered = getFilteredBatFiles(tab);
-  return filtered.filter((f) => f && !f.isMissing && selectedSet.has(f.path.toLowerCase()));
+  return filtered.filter(
+    (f) => f && (includeMissing || !f.isMissing) && selectedSet.has(f.path.toLowerCase())
+  );
 }
 
 function updateSelectedCountBadge(tab = getActiveTab()) {
@@ -1994,7 +2006,7 @@ function renderGroupsBar(tab = getActiveTab()) {
     chip.setAttribute('role', 'button');
     chip.tabIndex = 0;
     chip.className = `win95-btn group-chip${isActive ? ' active' : ''}`;
-    chip.title = `${group.name} (${group.files.length} file(s)) | Click to filter | Right-click for Run All`;
+    chip.title = `${group.name} (${group.files.length} file(s)) | Click to filter | Right-click for Run All / Delete Group`;
 
     const nameSpan = document.createElement('span');
     nameSpan.className = 'group-chip-name';
@@ -2011,23 +2023,9 @@ function renderGroupsBar(tab = getActiveTab()) {
     delBtn.textContent = 'x';
     delBtn.title = `Delete group "${group.name}"`;
 
-    const handleDeleteGroup = async (e) => {
+    const handleDeleteGroup = (e) => {
       e.stopPropagation();
-      closeGroupContextMenu();
-      try {
-        const updated = await invoke('delete_batch_group', {
-          projectPath: tab.projectPath,
-          groupId: group.id,
-        });
-        tab.groups = Array.isArray(updated) ? updated : [];
-        if (tab.activeGroupId === group.id) {
-          tab.activeGroupId = null;
-        }
-        renderGroupsBar(tab);
-        applyBatFilterAndRender(tab);
-      } catch (err) {
-        showAlert('Delete Group Error', escapeHtml(String(err)), '[X]');
-      }
+      openDeleteGroupConfirmModal(tab, group);
     };
 
     delBtn.addEventListener('click', handleDeleteGroup);
@@ -2071,28 +2069,109 @@ function renderGroupsBar(tab = getActiveTab()) {
   });
 }
 
+function closeDeleteGroupConfirmModal() {
+  const modal = document.getElementById('modal-confirm-delete-group');
+  if (modal) modal.style.display = 'none';
+  pendingDeleteGroupCtx = null;
+}
+
+function openDeleteGroupConfirmModal(tab, group) {
+  if (!tab || !group) return;
+  closeBatContextMenu();
+  closeGroupContextMenu();
+  if (activeGroupRunLocked || tab.isGroupRunning || runningGroupId === group.id) {
+    showAlert(
+      'Group Busy',
+      `Cannot delete group "${escapeHtml(group.name)}" while Run All is running.`,
+      '[!]'
+    );
+    return;
+  }
+  pendingDeleteGroupCtx = {
+    tabId: tab.id,
+    groupId: group.id,
+    groupName: group.name,
+  };
+  const msgEl = document.getElementById('delete-group-confirm-msg');
+  if (msgEl) {
+    const count = Array.isArray(group.files) ? group.files.length : 0;
+    msgEl.innerHTML =
+      `Delete batch group <b>${escapeHtml(group.name)}</b> (${count} file(s))?<br><br>` +
+      `Only the saved group entry is removed; all <b>.bat</b> files on disk remain untouched.`;
+  }
+  openSingleModal('modal-confirm-delete-group');
+}
+
+async function confirmDeleteGroupAction() {
+  const ctx = pendingDeleteGroupCtx;
+  closeDeleteGroupConfirmModal();
+  if (!ctx) return;
+
+  const tab = (ctx.tabId && getTabById(ctx.tabId)) || getActiveTab();
+  if (!tab || !tab.projectPath) return;
+
+  try {
+    const updated = await invoke('delete_batch_group', {
+      projectPath: tab.projectPath,
+      groupId: ctx.groupId,
+    });
+    tab.groups = Array.isArray(updated) ? updated : [];
+    if (tab.activeGroupId === ctx.groupId) {
+      tab.activeGroupId = null;
+    }
+    renderGroupsBar(tab);
+    applyBatFilterAndRender(tab);
+    if (tab.id === activeTabId) {
+      refreshBatPreviewAfterListChange(tab);
+    }
+  } catch (err) {
+    showAlert('Delete Group Error', escapeHtml(String(err)), '[X]');
+  }
+}
+
 function showGroupContextMenu(x, y, tab, group) {
   const menu = document.getElementById('group-context-menu');
   if (!menu || !tab || !group) return;
 
+  closeBatContextMenu();
   menu.innerHTML = '';
   const isBusy = activeGroupRunLocked || tab.isGroupRunning || runningGroupId === group.id;
-  const item = document.createElement('div');
-  item.className = `win95-context-item${isBusy ? ' disabled' : ''}`;
-  item.style.fontWeight = 'bold';
-  item.textContent = isBusy
-    ? `Run All (Running...)`
+
+  const runItem = document.createElement('div');
+  runItem.className = `win95-context-item${isBusy ? ' disabled' : ''}`;
+  runItem.style.fontWeight = 'bold';
+  runItem.textContent = isBusy
+    ? 'Run All (Running...)'
     : `Run All (${group.files.length})`;
 
   if (!isBusy) {
-    item.addEventListener('click', (e) => {
+    runItem.addEventListener('click', (e) => {
       e.stopPropagation();
       closeGroupContextMenu();
       runSavedBatchGroup(tab, group);
     });
   }
+  menu.appendChild(runItem);
 
-  menu.appendChild(item);
+  const sep = document.createElement('div');
+  sep.className = 'win95-context-sep';
+  menu.appendChild(sep);
+
+  const delItem = document.createElement('div');
+  delItem.className = `win95-context-item${isBusy ? ' disabled' : ''}`;
+  delItem.textContent = 'Delete Group';
+  delItem.title = isBusy
+    ? 'Cannot delete group while execution is active'
+    : `Delete group "${group.name}" without deleting .bat files`;
+  if (!isBusy) {
+    delItem.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeGroupContextMenu();
+      openDeleteGroupConfirmModal(tab, group);
+    });
+  }
+  menu.appendChild(delItem);
+
   positionPopupMenu(menu, x, y);
 }
 
@@ -2178,29 +2257,158 @@ function openAddGroupModal(tab, selectedFiles) {
   }
 }
 
+function fileMatchesGroupEntry(file, savedEntry) {
+  const fPath = String((file && file.path) || '')
+    .trim()
+    .replace(/\//g, '\\')
+    .toLowerCase();
+  const fName = String((file && file.name) || getFileBasename(fPath))
+    .trim()
+    .toLowerCase();
+  const sPath = String(savedEntry || '')
+    .trim()
+    .replace(/^"+|"+$/g, '')
+    .replace(/\//g, '\\')
+    .toLowerCase();
+  const sName = getFileBasename(sPath).toLowerCase();
+  return (fPath && sPath && fPath === sPath) || (fName && sName && fName === sName);
+}
+
+function findRemoveGroupTargets(tab, selectedFiles) {
+  if (!tab || !Array.isArray(tab.groups) || !selectedFiles || selectedFiles.length === 0) {
+    return [];
+  }
+  const candidateGroups = tab.activeGroupId
+    ? tab.groups.filter((g) => g.id === tab.activeGroupId)
+    : tab.groups;
+  const targets = [];
+
+  candidateGroups.forEach((grp) => {
+    const grpFiles = Array.isArray(grp.files) ? grp.files : [];
+    const matchedPaths = [];
+    selectedFiles.forEach((f) => {
+      if (f && f.path && grpFiles.some((entry) => fileMatchesGroupEntry(f, entry))) {
+        matchedPaths.push(f.path);
+      }
+    });
+    if (matchedPaths.length > 0) {
+      targets.push({ group: grp, files: matchedPaths });
+    }
+  });
+
+  return targets;
+}
+
+function refreshBatPreviewAfterListChange(tab) {
+  if (!tab) return;
+  const visible = getFilteredBatFiles(tab);
+  const visiblePathSet = new Set(
+    visible.map((f) => String((f && f.path) || '').toLowerCase()).filter(Boolean)
+  );
+  tab.selectedBatPaths = (tab.selectedBatPaths || []).filter((p) =>
+    visiblePathSet.has(String(p || '').toLowerCase())
+  );
+
+  const curSelected = String(tab.selectedBatPath || '').toLowerCase();
+  const stillVisible = curSelected && visiblePathSet.has(curSelected);
+  if (stillVisible) {
+    updateSelectedCountBadge(tab);
+    renderBatPreview(tab);
+    return;
+  }
+
+  if (visible.length > 0) {
+    const first = visible[0];
+    if (first.isMissing) {
+      tab.selectedBatPaths = [];
+      tab.lastSelectedBatIndex = 0;
+      tab.selectedBatPath = first.path;
+      tab.selectedBatName = first.name;
+      tab.selectedBatContent = `[Missing File] Referenced .bat file was not found on disk:\n${first.path}`;
+      updateSelectedCountBadge(tab);
+      renderBatPreview(tab);
+    } else {
+      tab.selectedBatPaths = [first.path];
+      tab.lastSelectedBatIndex = 0;
+      updateSelectedCountBadge(tab);
+      loadBatFileContentForTab(tab, first);
+    }
+    return;
+  }
+
+  tab.selectedBatPaths = [];
+  tab.lastSelectedBatIndex = -1;
+  tab.selectedBatPath = '';
+  tab.selectedBatName = '';
+  tab.selectedBatContent = '';
+  updateSelectedCountBadge(tab);
+  renderBatPreview(tab);
+}
+
+async function removeSelectedFilesFromGroupTargets(tab, targets) {
+  if (!tab || !tab.projectPath || !targets || targets.length === 0) return;
+  if (activeGroupRunLocked || tab.isGroupRunning) {
+    showAlert(
+      'Group Busy',
+      'Cannot modify batch group membership while Run All is running.',
+      '[!]'
+    );
+    return;
+  }
+
+  try {
+    let latestGroups = tab.groups || [];
+    for (const target of targets) {
+      latestGroups = await invoke('remove_files_from_batch_group', {
+        projectPath: tab.projectPath,
+        groupId: target.group.id,
+        files: target.files,
+      });
+    }
+    tab.groups = Array.isArray(latestGroups) ? latestGroups : [];
+    if (tab.activeGroupId && !tab.groups.some((g) => g.id === tab.activeGroupId)) {
+      tab.activeGroupId = null;
+    }
+    renderGroupsBar(tab);
+    applyBatFilterAndRender(tab);
+    if (tab.id === activeTabId) {
+      refreshBatPreviewAfterListChange(tab);
+    }
+  } catch (err) {
+    showAlert('Remove from Group Error', escapeHtml(String(err)), '[X]');
+  }
+}
+
 function showBatContextMenu(x, y, tab) {
   const menu = document.getElementById('bat-context-menu');
   if (!menu || !tab) return;
 
-  const selectedFiles = getSelectedFilesInDisplayOrder(tab);
-  if (selectedFiles.length === 0) return;
+  const allSelectedFiles = getSelectedFilesInDisplayOrder(tab, true);
+  if (allSelectedFiles.length === 0) return;
+  const validSelectedFiles = allSelectedFiles.filter((f) => !f.isMissing);
+  const removeTargets = findRemoveGroupTargets(tab, allSelectedFiles);
+
+  if (validSelectedFiles.length === 0 && removeTargets.length === 0) {
+    return;
+  }
 
   closeGroupContextMenu();
   menu.innerHTML = '';
 
-  if (selectedFiles.length >= 2) {
-    const isBusy = activeGroupRunLocked || tab.isGroupRunning;
+  const isBusy = activeGroupRunLocked || tab.isGroupRunning;
+
+  if (validSelectedFiles.length >= 2) {
     const runAllItem = document.createElement('div');
     runAllItem.className = `win95-context-item${isBusy ? ' disabled' : ''}`;
     runAllItem.style.fontWeight = 'bold';
     runAllItem.textContent = isBusy
       ? 'Run All (Running...)'
-      : `Run All (${selectedFiles.length})`;
+      : `Run All (${validSelectedFiles.length})`;
     if (!isBusy) {
       runAllItem.addEventListener('click', (e) => {
         e.stopPropagation();
         closeBatContextMenu();
-        runBatGroupSequential(tab, selectedFiles, null);
+        runBatGroupSequential(tab, validSelectedFiles, null);
       });
     }
     menu.appendChild(runAllItem);
@@ -2210,17 +2418,43 @@ function showBatContextMenu(x, y, tab) {
     menu.appendChild(sep);
   }
 
-  const addGroupItem = document.createElement('div');
-  addGroupItem.className = 'win95-context-item';
-  addGroupItem.style.fontWeight = 'bold';
-  addGroupItem.textContent = 'ADD GROUP';
-  addGroupItem.addEventListener('click', (e) => {
-    e.stopPropagation();
-    closeBatContextMenu();
-    openAddGroupModal(tab, selectedFiles);
-  });
+  if (validSelectedFiles.length >= 1) {
+    const addGroupItem = document.createElement('div');
+    addGroupItem.className = 'win95-context-item';
+    addGroupItem.style.fontWeight = 'bold';
+    addGroupItem.textContent = 'ADD GROUP';
+    addGroupItem.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeBatContextMenu();
+      openAddGroupModal(tab, validSelectedFiles);
+    });
+    menu.appendChild(addGroupItem);
+  }
 
-  menu.appendChild(addGroupItem);
+  if (removeTargets.length > 0) {
+    if (menu.children.length > 0) {
+      const sep = document.createElement('div');
+      sep.className = 'win95-context-sep';
+      menu.appendChild(sep);
+    }
+
+    const removeGroupItem = document.createElement('div');
+    removeGroupItem.className = `win95-context-item${isBusy ? ' disabled' : ''}`;
+    removeGroupItem.textContent = 'Remove from Group';
+    const targetNames = removeTargets.map((t) => `"${t.group.name}"`).join(', ');
+    removeGroupItem.title = isBusy
+      ? 'Cannot remove items while Run All is executing'
+      : `Remove selected item(s) from ${targetNames} (does not delete .bat file on disk)`;
+    if (!isBusy) {
+      removeGroupItem.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeBatContextMenu();
+        removeSelectedFilesFromGroupTargets(tab, removeTargets);
+      });
+    }
+    menu.appendChild(removeGroupItem);
+  }
+
   positionPopupMenu(menu, x, y);
 }
 
@@ -2422,6 +2656,14 @@ function renderBatFilesTable(files, totalCount, tab) {
       tr.classList.add('bat-status-running');
       statusTagHtml = '<span class="bat-status-tag bat-tag-running">RUN</span>';
       statusNote = ' | Status: RUNNING';
+    } else if (execStatus === 'cancelled') {
+      tr.classList.add('bat-status-cancelled');
+      statusTagHtml = '<span class="bat-status-tag bat-tag-cancelled">STOP</span>';
+      statusNote = ' | Status: CANCELLED';
+    } else if (execStatus === 'not_started') {
+      tr.classList.add('bat-status-not-started');
+      statusTagHtml = '<span class="bat-status-tag bat-tag-not-started">SKIP</span>';
+      statusNote = ' | Status: NOT STARTED';
     }
 
     tr.title = file.isMissing
@@ -2459,14 +2701,24 @@ function renderBatFilesTable(files, totalCount, tab) {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
         handleBatRowSelection(e, activeTab, file, idx, files);
-      } else if ((e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) && !file.isMissing) {
+      } else if (
+        (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) &&
+        (!file.isMissing || activeTab.activeGroupId)
+      ) {
         e.preventDefault();
         const curSet = new Set((activeTab.selectedBatPaths || []).map((p) => p.toLowerCase()));
         if (!curSet.has(file.path.toLowerCase())) {
           activeTab.selectedBatPaths = [file.path];
           activeTab.lastSelectedBatIndex = idx;
           updateSelectedCountBadge(activeTab);
-          loadBatFileContentForTab(activeTab, file);
+          if (file.isMissing) {
+            activeTab.selectedBatPath = file.path;
+            activeTab.selectedBatName = file.name;
+            activeTab.selectedBatContent = `[Missing File] Referenced .bat file was not found on disk:\n${file.path}`;
+            renderBatPreview(activeTab);
+          } else {
+            loadBatFileContentForTab(activeTab, file);
+          }
         }
         const rect = tr.getBoundingClientRect();
         showBatContextMenu(rect.left + 20, rect.bottom, activeTab);
@@ -2492,14 +2744,22 @@ function renderBatFilesTable(files, totalCount, tab) {
       e.stopPropagation();
       closeGroupContextMenu();
       const activeTab = getActiveTab();
-      if (!activeTab || file.isMissing) return;
+      if (!activeTab) return;
+      if (file.isMissing && !activeTab.activeGroupId) return;
 
       const curSet = new Set((activeTab.selectedBatPaths || []).map((p) => p.toLowerCase()));
       if (!curSet.has(file.path.toLowerCase())) {
         activeTab.selectedBatPaths = [file.path];
         activeTab.lastSelectedBatIndex = idx;
         updateSelectedCountBadge(activeTab);
-        loadBatFileContentForTab(activeTab, file);
+        if (file.isMissing) {
+          activeTab.selectedBatPath = file.path;
+          activeTab.selectedBatName = file.name;
+          activeTab.selectedBatContent = `[Missing File] Referenced .bat file was not found on disk:\n${file.path}`;
+          renderBatPreview(activeTab);
+        } else {
+          loadBatFileContentForTab(activeTab, file);
+        }
       }
       showBatContextMenu(e.clientX, e.clientY, activeTab);
     });
@@ -2559,6 +2819,37 @@ async function openBatInTextEditor(path) {
   }
 }
 
+function formatElapsedMinutesDisplay(elapsedMs) {
+  const safeMs = Math.max(0, Number(elapsedMs) || 0);
+  const totalSecs = Math.floor(safeMs / 1000);
+  const mins = Math.floor(totalSecs / 60);
+  const secs = totalSecs % 60;
+  const decimalMins = (safeMs / 60000).toFixed(2);
+  const mm = String(mins).padStart(2, '0');
+  const ss = String(secs).padStart(2, '0');
+  return `${decimalMins} min (${mm}:${ss})`;
+}
+
+function updateGroupRunElapsedDisplay(elapsedMs) {
+  const el = document.getElementById('group-run-elapsed-val');
+  if (el) {
+    el.textContent = formatElapsedMinutesDisplay(elapsedMs);
+  }
+}
+
+function stopGroupRunElapsedTimer(freezeAtNow = true) {
+  if (groupRunTimerInterval) {
+    clearInterval(groupRunTimerInterval);
+    groupRunTimerInterval = null;
+  }
+  if (freezeAtNow && groupRunStartedAtMs > 0 && groupRunElapsedFinalMs === null) {
+    groupRunElapsedFinalMs = Date.now() - groupRunStartedAtMs;
+  }
+  if (groupRunElapsedFinalMs !== null) {
+    updateGroupRunElapsedDisplay(groupRunElapsedFinalMs);
+  }
+}
+
 function renderGroupRunModal() {
   const tbody = document.getElementById('tbody-group-run-results');
   const outTitle = document.getElementById('group-run-output-title');
@@ -2574,6 +2865,10 @@ function renderGroupRunModal() {
       tr.classList.add('bat-status-success');
     } else if (step.status === 'FAILED') {
       tr.classList.add('bat-status-failed');
+    } else if (step.status === 'CANCELLED') {
+      tr.classList.add('bat-status-cancelled');
+    } else if (step.status === 'NOT STARTED') {
+      tr.classList.add('bat-status-not-started');
     } else {
       tr.classList.add('bat-status-pending');
     }
@@ -2588,6 +2883,10 @@ function renderGroupRunModal() {
       badgeHtml = '<span class="badge badge-green">OK</span>';
     } else if (step.status === 'FAILED') {
       badgeHtml = '<span class="badge badge-red">FAILED</span>';
+    } else if (step.status === 'CANCELLED') {
+      badgeHtml = '<span class="badge badge-cancelled">CANCELLED</span>';
+    } else if (step.status === 'NOT STARTED') {
+      badgeHtml = '<span class="badge badge-not-started">NOT STARTED</span>';
     }
 
     let imgBadgeHtml = '<span class="badge badge-gray">-</span>';
@@ -2634,7 +2933,11 @@ function renderGroupRunModal() {
     } else {
       outTitle.textContent = `Execution Output: ${activeStep.name} [${activeStep.status}]`;
       const parts = [];
-      if (activeStep.error_message) {
+      if (activeStep.status === 'CANCELLED') {
+        parts.push('[CANCELLED] Execution stopped by user.');
+      } else if (activeStep.status === 'NOT STARTED') {
+        parts.push('[NOT STARTED] Skipped after Stop All was requested.');
+      } else if (activeStep.error_message) {
         parts.push(`[ERROR] ${activeStep.error_message}`);
       }
       if (activeStep.screenshot_saved && activeStep.screenshot_path) {
@@ -2658,11 +2961,38 @@ function renderGroupRunModal() {
   }
 }
 
+async function requestStopGroupRun() {
+  if (!activeGroupRunLocked || groupRunStopRequested) return;
+  groupRunStopRequested = true;
+
+  const stopBtn = document.getElementById('modal-btn-stop-group-run');
+  if (stopBtn) {
+    stopBtn.disabled = true;
+    stopBtn.textContent = 'Stopping...';
+  }
+  const summaryEl = document.getElementById('group-run-summary');
+  if (summaryEl) {
+    summaryEl.textContent = 'Stopping Run All and terminating active process tree...';
+  }
+
+  if (activeGroupRunId) {
+    try {
+      await invoke('stop_bat_group_run', { runId: activeGroupRunId });
+    } catch (err) {
+      console.error('Stop group run error:', err);
+    }
+  }
+}
+
 function runSavedBatchGroup(tab, group) {
   if (!tab || !group) return;
-  const orderedFiles = resolveGroupOrderedFiles(tab, group);
+  const orderedFiles = resolveGroupOrderedFiles(tab, group).filter((f) => f && !f.isMissing);
   if (orderedFiles.length === 0) {
-    showAlert('Empty Group', `Group "${escapeHtml(group.name)}" contains no BAT files.`, '[!]');
+    showAlert(
+      'Empty Group',
+      `Group "${escapeHtml(group.name)}" contains no valid .bat files in the current Target Dir.`,
+      '[!]'
+    );
     return;
   }
   runBatGroupSequential(tab, orderedFiles, group);
@@ -2673,6 +3003,16 @@ async function runBatGroupSequential(tab, filesInOrder, groupMeta = null) {
   if (activeGroupRunLocked || tab.isGroupRunning) {
     showAlert('Group Run Busy', 'A batch group execution is already in progress.', '[!]');
     return;
+  }
+
+  groupRunSeq += 1;
+  activeGroupRunId = `grun_${Date.now()}_${groupRunSeq}`;
+  groupRunStopRequested = false;
+  groupRunStartedAtMs = Date.now();
+  groupRunElapsedFinalMs = null;
+  if (groupRunTimerInterval) {
+    clearInterval(groupRunTimerInterval);
+    groupRunTimerInterval = null;
   }
 
   activeGroupRunLocked = true;
@@ -2690,8 +3030,21 @@ async function runBatGroupSequential(tab, filesInOrder, groupMeta = null) {
   const summaryEl = document.getElementById('group-run-summary');
   const closeBtn = document.getElementById('modal-btn-close-group-run');
   const closeXBtn = document.getElementById('btn-close-modal-group-run');
+  const stopBtn = document.getElementById('modal-btn-stop-group-run');
   if (closeBtn) closeBtn.disabled = true;
   if (closeXBtn) closeXBtn.disabled = true;
+  if (stopBtn) {
+    stopBtn.style.display = 'inline-flex';
+    stopBtn.disabled = false;
+    stopBtn.textContent = 'Stop All';
+  }
+
+  updateGroupRunElapsedDisplay(0);
+  groupRunTimerInterval = setInterval(() => {
+    if (groupRunStartedAtMs > 0 && groupRunElapsedFinalMs === null) {
+      updateGroupRunElapsedDisplay(Date.now() - groupRunStartedAtMs);
+    }
+  }, 250);
 
   groupRunSteps = filesInOrder.map((f) => ({
     name: f.name,
@@ -2723,12 +3076,29 @@ async function runBatGroupSequential(tab, filesInOrder, groupMeta = null) {
 
   let passedCount = 0;
   let failedCount = 0;
+  let cancelledCount = 0;
+  let notStartedCount = 0;
   let imageErrorCount = 0;
   const total = filesInOrder.length;
   const groupPrefix = groupMeta ? `[${groupMeta.name}] ` : '';
 
+  const markRemainingNotStarted = (startIdx) => {
+    for (let j = startIdx; j < total; j++) {
+      if (groupRunSteps[j] && groupRunSteps[j].status === 'PENDING') {
+        groupRunSteps[j].status = 'NOT STARTED';
+        notStartedCount += 1;
+        setBatExecStatus(tab, filesInOrder[j].path, 'not_started', null);
+      }
+    }
+  };
+
   try {
     for (let i = 0; i < total; i++) {
+      if (groupRunStopRequested) {
+        markRemainingNotStarted(i);
+        break;
+      }
+
       const file = filesInOrder[i];
       groupRunSteps[i].status = 'RUNNING';
       groupRunSelectedIdx = i;
@@ -2745,6 +3115,7 @@ async function runBatGroupSequential(tab, filesInOrder, groupMeta = null) {
         const stepRes = await invoke('execute_bat_group_step', {
           path: file.path,
           projectPath: tab.projectPath || null,
+          runId: activeGroupRunId,
         });
         groupRunSteps[i].duration_ms = stepRes.duration_ms;
         groupRunSteps[i].exit_code = stepRes.exit_code;
@@ -2754,8 +3125,20 @@ async function runBatGroupSequential(tab, filesInOrder, groupMeta = null) {
         groupRunSteps[i].screenshot_path = stepRes.screenshot_path || null;
         groupRunSteps[i].screenshot_saved = !!stepRes.screenshot_saved;
         groupRunSteps[i].screenshot_error = stepRes.screenshot_error || null;
-        groupRunSteps[i].status = stepRes.success ? 'OK' : 'FAILED';
 
+        if (stepRes.cancelled) {
+          groupRunStopRequested = true;
+          groupRunSteps[i].status = 'CANCELLED';
+          groupRunSteps[i].screenshot_saved = false;
+          groupRunSteps[i].screenshot_error = null;
+          cancelledCount += 1;
+          setBatExecStatus(tab, file.path, 'cancelled', stepRes);
+          appendBuildLogForTab(tab.id, `[Group ${i + 1}/${total}] CANCELLED: ${file.name}`);
+          markRemainingNotStarted(i + 1);
+          break;
+        }
+
+        groupRunSteps[i].status = stepRes.success ? 'OK' : 'FAILED';
         setBatExecStatus(tab, file.path, stepRes.success ? 'success' : 'failed', stepRes);
 
         if (stepRes.screenshot_error) {
@@ -2775,7 +3158,23 @@ async function runBatGroupSequential(tab, filesInOrder, groupMeta = null) {
             `[Group ${i + 1}/${total}] FAILED: ${file.name} - ${stepRes.error_message || 'Non-zero exit'}`
           );
         }
+
+        if (groupRunStopRequested) {
+          markRemainingNotStarted(i + 1);
+          break;
+        }
       } catch (err) {
+        if (groupRunStopRequested) {
+          groupRunSteps[i].status = 'CANCELLED';
+          groupRunSteps[i].duration_ms = 0;
+          groupRunSteps[i].error_message = 'Cancelled by user';
+          cancelledCount += 1;
+          setBatExecStatus(tab, file.path, 'cancelled', { error_message: 'Cancelled by user' });
+          appendBuildLogForTab(tab.id, `[Group ${i + 1}/${total}] CANCELLED: ${file.name}`);
+          markRemainingNotStarted(i + 1);
+          break;
+        }
+
         failedCount += 1;
         groupRunSteps[i].status = 'FAILED';
         groupRunSteps[i].duration_ms = 0;
@@ -2793,16 +3192,41 @@ async function runBatGroupSequential(tab, filesInOrder, groupMeta = null) {
       renderGroupRunModal();
     }
   } finally {
+    stopGroupRunElapsedTimer(true);
+    const wasStopped = groupRunStopRequested || cancelledCount > 0 || notStartedCount > 0;
+    const elapsedText = formatElapsedMinutesDisplay(groupRunElapsedFinalMs || 0);
+
     activeGroupRunLocked = false;
     tab.isGroupRunning = false;
     runningGroupId = null;
+    activeGroupRunId = '';
+    groupRunStopRequested = false;
+
     renderGroupsBar(tab);
+    if (tab.id === activeTabId) {
+      applyBatFilterAndRender(tab);
+    }
+    renderGroupRunModal();
+
     if (closeBtn) closeBtn.disabled = false;
     if (closeXBtn) closeXBtn.disabled = false;
+    if (stopBtn) {
+      stopBtn.style.display = 'none';
+      stopBtn.disabled = true;
+      stopBtn.textContent = 'Stop All';
+    }
     if (summaryEl) {
       const imgNote =
         imageErrorCount > 0 ? ` (${imageErrorCount} screenshot error(s))` : '';
-      summaryEl.textContent = `${groupPrefix}Completed ${total} file(s) sequentially: ${passedCount} succeeded, ${failedCount} failed.${imgNote}`;
+      if (wasStopped) {
+        summaryEl.textContent =
+          `${groupPrefix}Stopped after ${elapsedText}: ` +
+          `${passedCount} succeeded, ${failedCount} failed, ${cancelledCount} cancelled, ${notStartedCount} not started.${imgNote}`;
+      } else {
+        summaryEl.textContent =
+          `${groupPrefix}Completed ${total} file(s) sequentially in ${elapsedText}: ` +
+          `${passedCount} succeeded, ${failedCount} failed.${imgNote}`;
+      }
     }
   }
 }
@@ -2814,6 +3238,9 @@ async function executeBuildForActiveTab() {
   const tab = getActiveTab();
   if (!tab || !tab.projectPath) {
     showAlert('No Project Selected', 'Please select a project directory before building.', '[!]');
+    return;
+  }
+  if (tab.isBuilding) {
     return;
   }
 
@@ -2851,6 +3278,7 @@ async function executeBuildForActiveTab() {
   }
 
   tab.isBuilding = true;
+  tab.isCancellingBuild = false;
   tab.cmdPanelOpen = true;
   tab.buildStatus = 'BUILDING...';
   tab.buildStatusClass = 'badge-yellow';
@@ -2912,6 +3340,11 @@ async function executeBuildForActiveTab() {
       tab.buildStatus = '\u2714 BUILD SUCCESSFUL';
       tab.buildStatusClass = 'badge-green';
       setTabFooterStatus(tab, 'Build Success', doneAt, 'ok');
+    } else if (res.cancelled) {
+      const doneAt = formatCurrentDateTime();
+      tab.buildStatus = '[CANCELLED] BUILD CANCELLED';
+      tab.buildStatusClass = 'badge-cancelled';
+      setTabFooterStatus(tab, 'Build Cancelled', doneAt, 'neutral');
     } else {
       const doneAt = formatCurrentDateTime();
       tab.buildStatus = '\u2716 BUILD FAILED';
@@ -2929,10 +3362,30 @@ async function executeBuildForActiveTab() {
     }
   } finally {
     tab.isBuilding = false;
+    tab.isCancellingBuild = false;
     renderTabsBar();
     if (tab.id === activeTabId) {
       syncUIToActiveTab();
     }
+  }
+}
+
+async function cancelBuildForActiveTab() {
+  const tab = getActiveTab();
+  if (!tab || !tab.isBuilding || tab.isCancellingBuild) return;
+
+  tab.isCancellingBuild = true;
+  tab.buildStatus = 'CANCELLING...';
+  tab.buildStatusClass = 'badge-yellow';
+  tab.footerStatusText = 'Cancelling build...';
+  tab.footerStatusTime = '';
+  tab.footerStatusKind = 'neutral';
+  syncUIToActiveTab();
+
+  try {
+    await invoke('cancel_ant_build', { tabId: tab.id });
+  } catch (err) {
+    console.error('Failed to cancel build:', err);
   }
 }
 
@@ -3687,9 +4140,13 @@ function setupUIEvents() {
     await openConfigPropertiesDirect();
   });
 
-  // 5. Run Build Button
+  // 5. Run Build & Cancel Build Buttons
   document.getElementById('btn-run-build').addEventListener('click', async () => {
     await executeBuildForActiveTab();
+  });
+
+  document.getElementById('btn-cancel-build').addEventListener('click', async () => {
+    await cancelBuildForActiveTab();
   });
 
   // 5b. Auto Config Button
@@ -4389,13 +4846,23 @@ function setupUIEvents() {
     }
   });
 
-  // Group Run Modal Close Handlers
+  // Group Run Modal Close & Stop All Handlers
   const closeGroupRunModal = () => {
     if (activeGroupRunLocked) return;
     document.getElementById('modal-group-run').style.display = 'none';
   };
   document.getElementById('btn-close-modal-group-run').addEventListener('click', closeGroupRunModal);
   document.getElementById('modal-btn-close-group-run').addEventListener('click', closeGroupRunModal);
+  document.getElementById('modal-btn-stop-group-run').addEventListener('click', async () => {
+    await requestStopGroupRun();
+  });
+
+  // Delete Batch Group Confirmation Modal Handlers
+  document.getElementById('btn-close-modal-delete-group').addEventListener('click', closeDeleteGroupConfirmModal);
+  document.getElementById('modal-btn-cancel-delete-group').addEventListener('click', closeDeleteGroupConfirmModal);
+  document.getElementById('modal-btn-confirm-delete-group').addEventListener('click', async () => {
+    await confirmDeleteGroupAction();
+  });
   document.getElementById('modal-btn-open-group-image').addEventListener('click', async () => {
     const activeStep = groupRunSteps[groupRunSelectedIdx] || null;
     if (!activeStep || !activeStep.screenshot_path) return;
@@ -4574,6 +5041,13 @@ function setupUIEvents() {
 
     if (isModalVisible('modal-confirm-clear-log')) {
       closeClearLogConfirmModal();
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
+    if (isModalVisible('modal-confirm-delete-group')) {
+      closeDeleteGroupConfirmModal();
       e.preventDefault();
       e.stopPropagation();
       return;

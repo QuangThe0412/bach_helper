@@ -1700,6 +1700,171 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_files_from_batch_group_preserves_disk_files() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_proj = std::env::temp_dir().join(format!("bh_rm_grp_{}", nanos));
+        let bat_dir = temp_proj.join("target").join("bat");
+        std::fs::create_dir_all(&bat_dir).unwrap();
+        let bat1 = bat_dir.join("01_alpha.bat");
+        let bat2 = bat_dir.join("02_beta.bat");
+        std::fs::write(&bat1, "@echo alpha\r\n").unwrap();
+        std::fs::write(&bat2, "@echo beta\r\n").unwrap();
+
+        let proj_str = temp_proj.to_string_lossy().to_string();
+        let proj_key = normalize_project_key(&proj_str);
+
+        let created = create_batch_group(
+            &proj_str,
+            "TempRemoveGroup",
+            vec![
+                bat1.to_string_lossy().to_string(),
+                bat2.to_string_lossy().to_string(),
+            ],
+        )
+        .unwrap();
+        let grp = created
+            .iter()
+            .find(|g| g.name == "TempRemoveGroup")
+            .expect("group must be created");
+        assert_eq!(grp.files.len(), 2);
+
+        let after_remove = remove_files_from_batch_group(
+            &proj_str,
+            &grp.id,
+            vec![bat1.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        let grp_after = after_remove
+            .iter()
+            .find(|g| g.id == grp.id)
+            .expect("group must remain after removing one file");
+        assert_eq!(grp_after.files.len(), 1);
+        assert!(grp_after.files[0].to_lowercase().contains("02_beta.bat"));
+
+        assert!(bat1.is_file(), "removing from group must NOT delete .bat on disk");
+        assert!(bat2.is_file(), "remaining .bat must stay on disk");
+
+        let _ = delete_batch_group(&proj_str, &grp.id);
+        let mut s = load_settings();
+        s.project_groups.remove(&proj_key);
+        let _ = save_settings(&s);
+        let _ = std::fs::remove_dir_all(&temp_proj);
+    }
+
+    #[test]
+    fn test_cancel_ant_build_and_kill_process_tree() {
+        let tab_id = format!(
+            "tab_cancel_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+
+        let guard = register_active_build(&tab_id).expect("first build registration should pass");
+        let dup = register_active_build(&tab_id);
+        assert!(dup.is_err(), "duplicate concurrent build for same tab must be rejected");
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let mut child = std::process::Command::new("cmd.exe")
+                .args(["/c", "ping -n 20 127.0.0.1 >nul"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+                .expect("spawn dummy cmd process");
+
+            let started = std::time::Instant::now();
+            assert!(!attach_active_build_pid(&tab_id, child.id()));
+            let cancelled = cancel_ant_build(&tab_id).expect("cancel call succeeds");
+            assert!(cancelled);
+            assert!(is_active_build_cancelled(&tab_id));
+
+            let _ = child.wait();
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "taskkill should terminate process tree quickly, elapsed={:?}",
+                started.elapsed()
+            );
+        }
+
+        drop(guard);
+        assert!(
+            !cancel_ant_build(&tab_id).unwrap(),
+            "after build guard drops, no active build should remain"
+        );
+    }
+
+    #[test]
+    fn test_stop_bat_group_run_terminates_running_step_and_skips_next() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("bh_stop_grp_{}", nanos));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let slow_bat = temp_dir.join("slow_step.bat");
+        let next_bat = temp_dir.join("next_step.bat");
+        std::fs::write(&slow_bat, "@echo off\r\nping -n 20 127.0.0.1 >nul\r\necho DONE\r\n").unwrap();
+        std::fs::write(&next_bat, "@echo off\r\necho NEXT_RAN\r\n").unwrap();
+
+        let setting = crate::modules::app_config::UserSetting {
+            ps_window_width: 1000,
+            ps_window_height: 650,
+            auto_capture_clipboard: false,
+            auto_save_image: false,
+            screenshot_save_dir: None,
+        };
+
+        let run_id = format!("test_run_{}", nanos);
+        reset_group_run_session(&run_id);
+
+        let stopper_id = run_id.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(450));
+            let _ = stop_bat_group_run(&stopper_id);
+        });
+
+        let started = std::time::Instant::now();
+        let step1 = execute_bat_group_step_with_setting_on_monitor_cancellable(
+            &slow_bat.to_string_lossy(),
+            None,
+            &setting,
+            None,
+            Some(&run_id),
+        );
+        let _ = handle.join();
+
+        assert!(step1.cancelled, "running step must be marked cancelled: {:?}", step1);
+        assert!(!step1.success);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(6),
+            "Stop All must kill slow child process quickly, elapsed={:?}",
+            started.elapsed()
+        );
+
+        let step2 = execute_bat_group_step_with_setting_on_monitor_cancellable(
+            &next_bat.to_string_lossy(),
+            None,
+            &setting,
+            None,
+            Some(&run_id),
+        );
+        assert!(step2.cancelled, "subsequent step under stopped run_id must abort before spawning");
+        assert!(
+            !step2.stdout.contains("NEXT_RAN"),
+            "subsequent step must not execute after stop"
+        );
+
+        reset_group_run_session(&run_id);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn test_validate_real_workspace_projects_read_only() {
         let onedrive_dir = "OneDrive - \u{682a}\u{5f0f}\u{4f1a}\u{793e}\u{30f4}\u{30a3}\u{30f3}\u{30af}\u{30b9}";
         let syohin = std::path::PathBuf::from(r"C:\Users\09204113161")

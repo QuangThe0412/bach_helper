@@ -402,6 +402,65 @@ pub fn add_files_to_batch_group(
     Ok(updated)
 }
 
+pub fn remove_files_from_batch_group(
+    project_path: &str,
+    group_id: &str,
+    files: Vec<String>,
+) -> Result<Vec<BatchGroup>, String> {
+    let key = normalize_project_key(project_path);
+    if key.is_empty() {
+        return Err("Please select a project directory first.".to_string());
+    }
+
+    let clean_id = group_id.trim();
+    if clean_id.is_empty() {
+        return Err("Target group ID cannot be empty.".to_string());
+    }
+
+    let mut remove_keys: HashSet<String> = HashSet::new();
+    let mut remove_names: HashSet<String> = HashSet::new();
+    for raw in &files {
+        let clean = normalize_file_entry(raw);
+        if clean.is_empty() {
+            continue;
+        }
+        remove_keys.insert(normalize_file_key(&clean));
+        if let Some(fname) = std::path::Path::new(&clean).file_name() {
+            let lower = fname.to_string_lossy().trim().to_lowercase();
+            if !lower.is_empty() {
+                remove_names.insert(lower);
+            }
+        }
+    }
+
+    if remove_keys.is_empty() && remove_names.is_empty() {
+        return Err("No valid .bat files selected to remove.".to_string());
+    }
+
+    let mut settings = load_settings();
+    let Some(groups) = settings.project_groups.get_mut(&key) else {
+        return Err("No batch groups found for this project.".to_string());
+    };
+
+    let Some(target_group) = groups.iter_mut().find(|g| g.id == clean_id) else {
+        return Err("Selected batch group no longer exists in this project.".to_string());
+    };
+
+    target_group.files.retain(|entry| {
+        let entry_key = normalize_file_key(entry);
+        let entry_name = std::path::Path::new(entry.trim().trim_matches('"'))
+            .file_name()
+            .map(|n| n.to_string_lossy().trim().to_lowercase())
+            .unwrap_or_default();
+        !remove_keys.contains(&entry_key)
+            && (entry_name.is_empty() || !remove_names.contains(&entry_name))
+    });
+
+    let updated = groups.clone();
+    save_settings(&settings)?;
+    Ok(updated)
+}
+
 pub fn delete_batch_group(project_path: &str, group_id: &str) -> Result<Vec<BatchGroup>, String> {
     let key = normalize_project_key(project_path);
     if key.is_empty() {

@@ -4,11 +4,13 @@ use crate::modules::encoding::{
 };
 use crate::modules::environment::decode_console_bytes;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
 pub const WINDOWS_CMD_LINE_LIMIT: usize = 8191;
@@ -38,6 +40,8 @@ pub struct BuildLogEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildResult {
     pub success: bool,
+    #[serde(default)]
+    pub cancelled: bool,
     pub exit_code: Option<i32>,
     pub message: String,
     pub build_xml_dir: String,
@@ -132,6 +136,8 @@ pub struct BatGroupStepResult {
     pub path: String,
     pub name: String,
     pub success: bool,
+    #[serde(default)]
+    pub cancelled: bool,
     pub exit_code: Option<i32>,
     pub duration_ms: u64,
     pub stdout: String,
@@ -166,6 +172,205 @@ pub struct ClearLogsResult {
     pub cleared_files: Vec<String>,
     pub failed_files: Vec<String>,
     pub log_dirs_checked: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ActiveProcessEntry {
+    pid: Option<u32>,
+    cancelled: bool,
+}
+
+static ACTIVE_BUILDS: OnceLock<Mutex<HashMap<String, ActiveProcessEntry>>> = OnceLock::new();
+static ACTIVE_GROUP_RUNS: OnceLock<Mutex<HashMap<String, ActiveProcessEntry>>> = OnceLock::new();
+
+fn active_builds_map() -> &'static Mutex<HashMap<String, ActiveProcessEntry>> {
+    ACTIVE_BUILDS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn active_group_runs_map() -> &'static Mutex<HashMap<String, ActiveProcessEntry>> {
+    ACTIVE_GROUP_RUNS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn normalize_build_key(tab_id: &str) -> String {
+    let trimmed = tab_id.trim();
+    if trimmed.is_empty() {
+        "__default__".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Terminate a process and its entire descendant tree without spawning a visible console window.
+pub fn kill_process_tree(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let _ = Command::new("taskkill.exe")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+    }
+}
+
+pub(crate) struct ActiveBuildGuard {
+    key: String,
+}
+
+impl Drop for ActiveBuildGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = active_builds_map().lock() {
+            guard.remove(&self.key);
+        }
+    }
+}
+
+pub(crate) fn register_active_build(tab_id: &str) -> Result<ActiveBuildGuard, String> {
+    let key = normalize_build_key(tab_id);
+    let mut guard = active_builds_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if guard.contains_key(&key) {
+        return Err("A build is already running for this project tab.".to_string());
+    }
+    guard.insert(key.clone(), ActiveProcessEntry::default());
+    Ok(ActiveBuildGuard { key })
+}
+
+pub(crate) fn attach_active_build_pid(tab_id: &str, pid: u32) -> bool {
+    let key = normalize_build_key(tab_id);
+    let mut guard = active_builds_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let entry = guard.entry(key).or_default();
+    entry.pid = Some(pid);
+    entry.cancelled
+}
+
+pub(crate) fn is_active_build_cancelled(tab_id: &str) -> bool {
+    let key = normalize_build_key(tab_id);
+    let guard = active_builds_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    guard.get(&key).map(|e| e.cancelled).unwrap_or(false)
+}
+
+/// Request cancellation of an active Ant build for `tab_id` and kill its process tree.
+pub fn cancel_ant_build(tab_id: &str) -> Result<bool, String> {
+    let key = normalize_build_key(tab_id);
+    let pid_to_kill = {
+        let mut guard = active_builds_map()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = guard.get_mut(&key) else {
+            return Ok(false);
+        };
+        entry.cancelled = true;
+        entry.pid
+    };
+    if let Some(pid) = pid_to_kill {
+        kill_process_tree(pid);
+    }
+    Ok(true)
+}
+
+fn prune_stale_group_runs(map: &mut HashMap<String, ActiveProcessEntry>) {
+    if map.len() > 64 {
+        map.retain(|_, v| v.pid.is_some());
+    }
+}
+
+pub fn reset_group_run_session(run_id: &str) {
+    let clean = run_id.trim();
+    if clean.is_empty() {
+        return;
+    }
+    let mut guard = active_group_runs_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    guard.remove(clean);
+}
+
+pub fn is_group_run_cancelled(run_id: Option<&str>) -> bool {
+    let Some(clean) = run_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let guard = active_group_runs_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    guard.get(clean).map(|e| e.cancelled).unwrap_or(false)
+}
+
+/// Request stopping an active sequential batch group run and terminate its running process tree.
+pub fn stop_bat_group_run(run_id: &str) -> Result<bool, String> {
+    let clean = run_id.trim();
+    if clean.is_empty() {
+        return Ok(false);
+    }
+    let pid_to_kill = {
+        let mut guard = active_group_runs_map()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        prune_stale_group_runs(&mut guard);
+        let entry = guard.entry(clean.to_string()).or_default();
+        entry.cancelled = true;
+        entry.pid
+    };
+    if let Some(pid) = pid_to_kill {
+        kill_process_tree(pid);
+    }
+    Ok(true)
+}
+
+struct ActiveGroupPidGuard {
+    run_id: Option<String>,
+}
+
+impl Drop for ActiveGroupPidGuard {
+    fn drop(&mut self) {
+        if let Some(ref clean) = self.run_id {
+            if let Ok(mut guard) = active_group_runs_map().lock() {
+                if let Some(entry) = guard.get_mut(clean) {
+                    entry.pid = None;
+                }
+            }
+        }
+    }
+}
+
+fn attach_group_step_pid(run_id: Option<&str>, pid: u32) -> ActiveGroupPidGuard {
+    let clean_opt = run_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let already_cancelled = if let Some(ref clean) = clean_opt {
+        let mut guard = active_group_runs_map()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        prune_stale_group_runs(&mut guard);
+        let entry = guard.entry(clean.clone()).or_default();
+        entry.pid = Some(pid);
+        entry.cancelled
+    } else {
+        false
+    };
+
+    if already_cancelled {
+        kill_process_tree(pid);
+    }
+
+    ActiveGroupPidGuard { run_id: clean_opt }
 }
 
 /// Find any OneDrive Desktop directories under USERPROFILE
@@ -3185,6 +3390,8 @@ pub fn run_ant_build(
     java_home: Option<String>,
     custom_target_path: Option<String>,
 ) -> Result<BuildResult, String> {
+    let _build_guard = register_active_build(&tab_id)?;
+
     let build_dir = find_build_dir(&project_path).ok_or_else(|| {
         format!(
             "Cannot find build.xml in '{}' or its 'build' subfolder",
@@ -3343,9 +3550,47 @@ pub fn run_ant_build(
         }
     }
 
+    if is_active_build_cancelled(&tab_id) {
+        emit_line(&app, &tab_id, "[CANCELLED] Build was cancelled by user.".to_string());
+        let inspection = inspect_target_files_with_target(
+            &project_path,
+            &target,
+            if validation.is_default_target {
+                None
+            } else {
+                Some(validation.effective_target_path.as_str())
+            },
+        );
+        return Ok(BuildResult {
+            success: false,
+            cancelled: true,
+            exit_code: None,
+            message: "BUILD CANCELLED".to_string(),
+            build_xml_dir: build_dir.to_string_lossy().to_string(),
+            target,
+            properties_file: inspection.properties_file,
+            base_directory: inspection.base_directory,
+            default_target_path: inspection.default_target_path,
+            effective_target_path: inspection.effective_target_path,
+            is_default_target: inspection.is_default_target,
+            bat_folder: inspection.bat_folder,
+            bat_files: inspection.bat_files,
+            batch_log_name: inspection.batch_log_name,
+            app_log_name: inspection.app_log_name,
+            log_file_path: inspection.log_file_path,
+            app_log_file_path: inspection.app_log_file_path,
+            log_folder_path: inspection.log_folder_path,
+        });
+    }
+
     let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to spawn build process: {}", e))?;
+
+    let child_pid = child.id();
+    if attach_active_build_pid(&tab_id, child_pid) {
+        kill_process_tree(child_pid);
+    }
 
     let stdout = child.stdout.take().ok_or("Failed to open stdout")?;
     let stderr = child.stderr.take().ok_or("Failed to open stderr")?;
@@ -3412,13 +3657,17 @@ pub fn run_ant_build(
         all_lines.push(line);
     }
 
+    let was_cancelled = is_active_build_cancelled(&tab_id);
     let exit_code = status.code().unwrap_or(-1);
     let has_build_successful = all_lines.iter().any(|l| l.contains("BUILD SUCCESSFUL"));
     let has_build_failed = all_lines.iter().any(|l| l.contains("BUILD FAILED"));
 
-    let is_success = status.success() && has_build_successful && !has_build_failed;
+    let is_success = !was_cancelled && status.success() && has_build_successful && !has_build_failed;
 
-    let result_msg = if is_success {
+    let result_msg = if was_cancelled {
+        emit_line(&app, &tab_id, "[CANCELLED] Build was cancelled by user.".to_string());
+        "BUILD CANCELLED".to_string()
+    } else if is_success {
         "BUILD SUCCESSFUL".to_string()
     } else {
         "BUILD FAILED".to_string()
@@ -3436,6 +3685,7 @@ pub fn run_ant_build(
 
     Ok(BuildResult {
         success: is_success,
+        cancelled: was_cancelled,
         exit_code: Some(exit_code),
         message: result_msg,
         build_xml_dir: build_dir.to_string_lossy().to_string(),
@@ -4399,6 +4649,31 @@ pub fn execute_bat_in_powershell_with_setting(
     })
 }
 
+fn make_cancelled_step_result(
+    clean_path: String,
+    name: String,
+    duration_ms: u64,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    screenshot_path: Option<String>,
+) -> BatGroupStepResult {
+    BatGroupStepResult {
+        path: clean_path,
+        name,
+        success: false,
+        cancelled: true,
+        exit_code,
+        duration_ms,
+        stdout,
+        stderr,
+        error_message: Some("Cancelled by user".to_string()),
+        screenshot_path,
+        screenshot_saved: false,
+        screenshot_error: None,
+    }
+}
+
 fn run_hidden_bat_cmd(
     clean_path: &str,
     name: &str,
@@ -4406,7 +4681,20 @@ fn run_hidden_bat_cmd(
     start: std::time::Instant,
     screenshot_path: Option<String>,
     screenshot_error: Option<String>,
+    run_id: Option<&str>,
 ) -> BatGroupStepResult {
+    if is_group_run_cancelled(run_id) {
+        return make_cancelled_step_result(
+            clean_path.to_string(),
+            name.to_string(),
+            start.elapsed().as_millis() as u64,
+            None,
+            String::new(),
+            String::new(),
+            screenshot_path,
+        );
+    }
+
     #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -4419,12 +4707,49 @@ fn run_hidden_bat_cmd(
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    match cmd.output() {
-        Ok(output) => {
-            let (stdout, _) = detect_and_decode_text(&output.stdout);
-            let (stderr, _) = detect_and_decode_text(&output.stderr);
-            let exit_code = output.status.code();
-            let success = output.status.success();
+    match cmd.spawn() {
+        Ok(mut child) => {
+            let stdout_pipe = child.stdout.take();
+            let stderr_pipe = child.stderr.take();
+            let _pid_guard = attach_group_step_pid(run_id, child.id());
+
+            let out_handle = std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut p) = stdout_pipe {
+                    let _ = p.read_to_end(&mut buf);
+                }
+                buf
+            });
+            let err_handle = std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut p) = stderr_pipe {
+                    let _ = p.read_to_end(&mut buf);
+                }
+                buf
+            });
+
+            let wait_res = child.wait();
+            let out_bytes = out_handle.join().unwrap_or_default();
+            let err_bytes = err_handle.join().unwrap_or_default();
+            drop(_pid_guard);
+
+            let (stdout, _) = detect_and_decode_text(&out_bytes);
+            let (stderr, _) = detect_and_decode_text(&err_bytes);
+            let exit_code = wait_res.ok().and_then(|s| s.code());
+
+            if is_group_run_cancelled(run_id) {
+                return make_cancelled_step_result(
+                    clean_path.to_string(),
+                    name.to_string(),
+                    start.elapsed().as_millis() as u64,
+                    exit_code,
+                    stdout,
+                    stderr,
+                    screenshot_path,
+                );
+            }
+
+            let success = exit_code == Some(0);
             let error_message = if success {
                 None
             } else {
@@ -4440,6 +4765,7 @@ fn run_hidden_bat_cmd(
                 path: clean_path.to_string(),
                 name: name.to_string(),
                 success,
+                cancelled: false,
                 exit_code,
                 duration_ms: start.elapsed().as_millis() as u64,
                 stdout,
@@ -4451,11 +4777,23 @@ fn run_hidden_bat_cmd(
             }
         }
         Err(e) => {
+            if is_group_run_cancelled(run_id) {
+                return make_cancelled_step_result(
+                    clean_path.to_string(),
+                    name.to_string(),
+                    start.elapsed().as_millis() as u64,
+                    None,
+                    String::new(),
+                    String::new(),
+                    screenshot_path,
+                );
+            }
             let err_msg = format!("Failed to execute '{}': {}", name, e);
             BatGroupStepResult {
                 path: clean_path.to_string(),
                 name: name.to_string(),
                 success: false,
+                cancelled: false,
                 exit_code: None,
                 duration_ms: start.elapsed().as_millis() as u64,
                 stdout: String::new(),
@@ -4475,8 +4813,24 @@ pub fn execute_bat_group_step(
     project_path: Option<&str>,
     monitor_anchor: Option<(i32, i32)>,
 ) -> BatGroupStepResult {
+    execute_bat_group_step_cancellable(path, project_path, monitor_anchor, None)
+}
+
+/// Execute a single `.bat` script sequentially with optional group-run cancellation session tracking.
+pub fn execute_bat_group_step_cancellable(
+    path: &str,
+    project_path: Option<&str>,
+    monitor_anchor: Option<(i32, i32)>,
+    run_id: Option<&str>,
+) -> BatGroupStepResult {
     let setting = crate::modules::app_config::load_user_setting();
-    execute_bat_group_step_with_setting_on_monitor(path, project_path, &setting, monitor_anchor)
+    execute_bat_group_step_with_setting_on_monitor_cancellable(
+        path,
+        project_path,
+        &setting,
+        monitor_anchor,
+        run_id,
+    )
 }
 
 /// Core sequential `.bat` step executor parameterized by `UserSetting` for clean testability.
@@ -4485,7 +4839,13 @@ pub fn execute_bat_group_step_with_setting(
     project_path: Option<&str>,
     setting: &crate::modules::app_config::UserSetting,
 ) -> BatGroupStepResult {
-    execute_bat_group_step_with_setting_on_monitor(path, project_path, setting, None)
+    execute_bat_group_step_with_setting_on_monitor_cancellable(
+        path,
+        project_path,
+        setting,
+        None,
+        None,
+    )
 }
 
 /// Core sequential `.bat` step executor with optional multi-monitor anchor coordinate.
@@ -4495,6 +4855,23 @@ pub fn execute_bat_group_step_with_setting_on_monitor(
     setting: &crate::modules::app_config::UserSetting,
     monitor_anchor: Option<(i32, i32)>,
 ) -> BatGroupStepResult {
+    execute_bat_group_step_with_setting_on_monitor_cancellable(
+        path,
+        project_path,
+        setting,
+        monitor_anchor,
+        None,
+    )
+}
+
+/// Core sequential `.bat` step executor with optional multi-monitor anchor coordinate and `run_id` cancellation.
+pub fn execute_bat_group_step_with_setting_on_monitor_cancellable(
+    path: &str,
+    project_path: Option<&str>,
+    setting: &crate::modules::app_config::UserSetting,
+    monitor_anchor: Option<(i32, i32)>,
+    run_id: Option<&str>,
+) -> BatGroupStepResult {
     let start = std::time::Instant::now();
     let clean_path = path.trim().trim_matches('"').replace('/', "\\");
     let p = Path::new(&clean_path);
@@ -4503,11 +4880,24 @@ pub fn execute_bat_group_step_with_setting_on_monitor(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| clean_path.clone());
 
+    if is_group_run_cancelled(run_id) {
+        return make_cancelled_step_result(
+            clean_path,
+            name,
+            start.elapsed().as_millis() as u64,
+            None,
+            String::new(),
+            String::new(),
+            None,
+        );
+    }
+
     if !p.is_file() {
         return BatGroupStepResult {
             path: clean_path.clone(),
             name,
             success: false,
+            cancelled: false,
             exit_code: None,
             duration_ms: start.elapsed().as_millis() as u64,
             stdout: String::new(),
@@ -4522,7 +4912,7 @@ pub fn execute_bat_group_step_with_setting_on_monitor(
     let parent = p.parent().unwrap_or(p);
 
     if !setting.auto_save_image || cfg!(not(windows)) {
-        return run_hidden_bat_cmd(&clean_path, &name, parent, start, None, None);
+        return run_hidden_bat_cmd(&clean_path, &name, parent, start, None, None, run_id);
     }
 
     #[cfg(windows)]
@@ -4543,6 +4933,7 @@ pub fn execute_bat_group_step_with_setting_on_monitor(
                 start,
                 Some(target_png_str),
                 Some(dir_err),
+                run_id,
             );
         }
 
@@ -4576,6 +4967,7 @@ pub fn execute_bat_group_step_with_setting_on_monitor(
                 start,
                 Some(target_png_str),
                 Some(ps_err),
+                run_id,
             );
         }
         let ps1_str = ps1_path.to_string_lossy().to_string();
@@ -4594,7 +4986,10 @@ pub fn execute_bat_group_step_with_setting_on_monitor(
 
         match child_res {
             Ok(mut child) => {
+                let _pid_guard = attach_group_step_pid(run_id, child.id());
                 let wait_res = child.wait();
+                drop(_pid_guard);
+
                 let stdout = fs::read_to_string(&out_file)
                     .unwrap_or_default()
                     .trim_start_matches('\u{feff}')
@@ -4610,6 +5005,19 @@ pub fn execute_bat_group_step_with_setting_on_monitor(
                 let meta = serde_json::from_str::<GroupPsMeta>(meta_raw.trim()).ok();
                 let fallback_exit = wait_res.ok().and_then(|s| s.code());
                 let exit_code = meta.as_ref().and_then(|m| m.exit_code).or(fallback_exit);
+
+                if is_group_run_cancelled(run_id) {
+                    return make_cancelled_step_result(
+                        clean_path,
+                        name,
+                        start.elapsed().as_millis() as u64,
+                        exit_code,
+                        stdout,
+                        String::new(),
+                        Some(target_png_str),
+                    );
+                }
+
                 let success = exit_code == Some(0);
                 let error_message = if success {
                     None
@@ -4653,6 +5061,7 @@ pub fn execute_bat_group_step_with_setting_on_monitor(
                     path: clean_path,
                     name,
                     success,
+                    cancelled: false,
                     exit_code,
                     duration_ms: start.elapsed().as_millis() as u64,
                     stdout,
@@ -4677,6 +5086,7 @@ pub fn execute_bat_group_step_with_setting_on_monitor(
                         "Failed to launch PowerShell screenshot runner: {}",
                         e
                     )),
+                    run_id,
                 )
             }
         }

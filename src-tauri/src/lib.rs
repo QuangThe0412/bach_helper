@@ -224,6 +224,25 @@ async fn start_ant_build(
 }
 
 #[tauri::command]
+async fn cancel_ant_build(app: AppHandle, tab_id: Option<String>) -> Result<bool, String> {
+    let tid = tab_id.unwrap_or_default();
+    let tid_for_log = tid.clone();
+    let cancelled = tauri::async_runtime::spawn_blocking(move || builder::cancel_ant_build(&tid))
+        .await
+        .map_err(|e| format!("Task join error: {}", e))??;
+    if cancelled {
+        let _ = app.emit(
+            "build-output",
+            builder::BuildLogEvent {
+                tab_id: tid_for_log,
+                line: "[WARN] Cancelling build and terminating active child processes...".to_string(),
+            },
+        );
+    }
+    Ok(cancelled)
+}
+
+#[tauri::command]
 async fn validate_target_build_path(
     project_path: String,
     target: String,
@@ -342,13 +361,26 @@ async fn execute_bat_group_step(
     app: AppHandle,
     path: String,
     project_path: Option<String>,
+    run_id: Option<String>,
 ) -> Result<BatGroupStepResult, String> {
     let anchor = resolve_main_window_anchor(&app);
     tauri::async_runtime::spawn_blocking(move || {
-        builder::execute_bat_group_step(&path, project_path.as_deref(), anchor)
+        builder::execute_bat_group_step_cancellable(
+            &path,
+            project_path.as_deref(),
+            anchor,
+            run_id.as_deref(),
+        )
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))
+}
+
+#[tauri::command]
+async fn stop_bat_group_run(run_id: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || builder::stop_bat_group_run(&run_id))
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
 }
 
 #[tauri::command]
@@ -478,6 +510,15 @@ async fn add_files_to_batch_group(
     files: Vec<String>,
 ) -> Result<Vec<BatchGroup>, String> {
     settings::add_files_to_batch_group(&project_path, &group_id, files)
+}
+
+#[tauri::command]
+async fn remove_files_from_batch_group(
+    project_path: String,
+    group_id: String,
+    files: Vec<String>,
+) -> Result<Vec<BatchGroup>, String> {
+    settings::remove_files_from_batch_group(&project_path, &group_id, files)
 }
 
 #[tauri::command]
@@ -687,6 +728,7 @@ pub fn run() {
             save_user_setting,
             get_user_setting_path,
             start_ant_build,
+            cancel_ant_build,
             validate_target_build_path,
             get_project_target_path,
             set_project_target_path,
@@ -695,6 +737,7 @@ pub fn run() {
             open_file_default,
             open_file_in_text_editor,
             execute_bat_group_step,
+            stop_bat_group_run,
             inspect_build_target,
             scan_custom_bat_dir,
             open_path_in_explorer,
@@ -705,6 +748,7 @@ pub fn run() {
             get_project_groups,
             create_batch_group,
             add_files_to_batch_group,
+            remove_files_from_batch_group,
             delete_batch_group,
             get_default_screenshot_dir,
             normalize_project_path,
